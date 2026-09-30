@@ -1,7 +1,7 @@
 # The plugin catalog: buf's plugin names, each published under
 # ghcr.io/greatliontech/pb-plugins/<name>:<version> from a recipe of
 # its own. The versions published are plugins/<name>/versions, one
-# tag per line ascending; a recipe's extra files live beside it.
+# tag per line ascending; a recipe's own files under plugins/<name>/files.
 #
 # Every kind produces, per platform, a tree holding one file: the
 # entrypoint at the tree's root, which `pb plugin build` packages as

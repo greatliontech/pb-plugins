@@ -72,9 +72,9 @@ type Plugin struct {
 	Member string            `yaml:"member"`
 
 	// Archive is a bazel recipe's source archive URL, Strip the
-	// leading path components dropped extracting it, Files a
-	// directory of the recipe's own files copied into the source
-	// tree at the path of the same name, Target the bazel target and
+	// leading path components dropped extracting it, Files the
+	// directory under the source tree the recipe's own files
+	// (plugins/<name>/files) are copied to, Target the bazel target and
 	// Output the built executable's path under the source tree.
 	Archive string `yaml:"archive"`
 	Strip   int    `yaml:"strip"`

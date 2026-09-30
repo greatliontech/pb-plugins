@@ -15,8 +15,10 @@ executables the recipes produce.
 - `plugins/<owner>/<plugin>/versions` — the tags published, one per
   line ascending, in buf's spelling (`v1.36.12`; `v36.2` where
   upstream's releases carry two components). A recipe's own files
-  lie beside it (`plugins/protocolbuffers/csharp/` holds the
-  `cc_binary` protobuf does not ship).
+  lie under `plugins/<owner>/<plugin>/files`, copied into the source
+  tree at the directory the recipe's `files` names
+  (`plugins/protocolbuffers/csharp/files/` holds the `cc_binary`
+  protobuf does not ship).
 - `cmd/catalog` — the tool the workflows run: `check`, `plan`,
   `tree`, `publish`, `bump`.
 

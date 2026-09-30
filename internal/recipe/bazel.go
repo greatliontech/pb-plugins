@@ -19,7 +19,8 @@ import (
 
 // buildBazel fetches the source archive, extracts it with the
 // recipe's leading components stripped, copies the recipe's own files
-// into the source tree, builds the target with bazel on the host
+// (plugins/<name>/files) into the source tree at the directory the
+// recipe names, builds the target with bazel on the host
 // itself and copies the output to the tree. bazelisk is preferred
 // where present so the source's own .bazelversion picks the bazel.
 func buildBazel(ctx context.Context, c *catalog.Catalog, name string, p *catalog.Plugin, version string, platforms []string, out string) error {
@@ -47,7 +48,7 @@ func buildBazel(ctx context.Context, c *catalog.Catalog, name string, p *catalog
 		return err
 	}
 	if p.Files != "" {
-		from := filepath.Join(c.Dir, "plugins", filepath.FromSlash(name), p.Files)
+		from := filepath.Join(c.Dir, "plugins", filepath.FromSlash(name), "files")
 		if err := copyTree(from, filepath.Join(src, p.Files)); err != nil {
 			return err
 		}
