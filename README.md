@@ -1,5 +1,8 @@
 # pb-plugins
 
+**wip** — work in progress: nothing here is released, tags and
+recipes may change without notice.
+
 The plugin catalog behind `ghcr.io/greatliontech/pb-plugins`: buf's
 plugin names, each built from a recipe of this repository's own and
 published as a plugin image pb runs (`pb`'s `plugin-execution.md` and
