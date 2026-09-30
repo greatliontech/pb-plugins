@@ -1,0 +1,54 @@
+# Discovers the versions upstream has published above each plugin's
+# highest and opens one pull request appending them; merging it
+# publishes them. The pull request is opened under the organization's
+# app so its checks run.
+name: bump
+
+on:
+  schedule:
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bump:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ vars.GLT_RELEASER_APP_ID }}
+          private-key: ${{ secrets.GLT_RELEASER_APP_KEY }}
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - id: bump
+        run: |
+          go run ./cmd/catalog bump | tee added.txt
+          {
+            echo 'added<<EOF'
+            cat added.txt
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+          rm added.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          branch: bump/versions
+          delete-branch: true
+          commit-message: "catalog: the versions upstream published"
+          title: "catalog: the versions upstream published"
+          body: |
+            The versions upstream has above each plugin's highest,
+            appended by `catalog bump`; merging publishes them.
+
+            ```
+            ${{ steps.bump.outputs.added }}
+            ```

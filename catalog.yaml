@@ -1,0 +1,113 @@
+# The plugin catalog: buf's plugin names, each published under
+# ghcr.io/greatliontech/pb-plugins/<name>:<version> from a recipe of
+# its own. The versions published are plugins/<name>/versions, one
+# tag per line ascending; a recipe's extra files live beside it.
+#
+# Every kind produces, per platform, a tree holding one file: the
+# entrypoint at the tree's root, which `pb plugin build` packages as
+# the image's `/<entrypoint>`. Where a kind's Linux executables link
+# the platform's C library (node, release and bazel), the Linux trees
+# are layered over `base`, pinned by its index digest and resolved to
+# the platform's own image at publish.
+registry: ghcr.io/greatliontech/pb-plugins
+base: gcr.io/distroless/cc-debian13@sha256:4594d59540d1948417f6ca2829ddd9294493a7c68b7528f4dd459de7f203a750
+
+plugins:
+  # kind go: a Go main package cross-compiled with CGO disabled to
+  # every platform; the versions discovered from the module proxy.
+  protocolbuffers/go:
+    source: https://github.com/protocolbuffers/protobuf-go
+    kind: go
+    module: google.golang.org/protobuf
+    package: cmd/protoc-gen-go
+    entrypoint: protoc-gen-go
+    platforms: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64, windows/arm64]
+  grpc/go:
+    source: https://github.com/grpc/grpc-go
+    kind: go
+    module: google.golang.org/grpc/cmd/protoc-gen-go-grpc
+    package: .
+    entrypoint: protoc-gen-go-grpc
+    platforms: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64, windows/arm64]
+  connectrpc/go:
+    source: https://github.com/connectrpc/connect-go
+    kind: go
+    module: connectrpc.com/connect
+    package: cmd/protoc-gen-connect-go
+    entrypoint: protoc-gen-connect-go
+    platforms: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64, windows/arm64]
+
+  # kind node: an npm package's executable compiled with bun into one
+  # standalone executable per platform; the versions discovered from
+  # the npm registry. The Linux executables link glibc: base applies.
+  bufbuild/es:
+    source: https://github.com/bufbuild/protobuf-es
+    kind: node
+    package: "@bufbuild/protoc-gen-es"
+    entrypoint: protoc-gen-es
+    platforms: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64, windows/arm64]
+  connectrpc/es:
+    source: https://github.com/connectrpc/connect-es
+    kind: node
+    package: "@connectrpc/protoc-gen-connect-es"
+    entrypoint: protoc-gen-connect-es
+    platforms: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64, windows/arm64]
+
+  # kind release: an executable an upstream GitHub release ships
+  # prebuilt, one asset per platform it ships for, the member named
+  # extracted from it; the versions discovered from the releases. The
+  # Linux executables link glibc: base applies.
+  protocolbuffers/js:
+    source: https://github.com/protocolbuffers/protobuf-javascript
+    kind: release
+    repository: protocolbuffers/protobuf-javascript
+    tag: v{version}
+    member: bin/protoc-gen-js{exe}
+    entrypoint: protoc-gen-js
+    assets:
+      linux/amd64: protobuf-javascript-{version}-linux-x86_64.tar.gz
+      linux/arm64: protobuf-javascript-{version}-linux-aarch_64.tar.gz
+      darwin/amd64: protobuf-javascript-{version}-osx-x86_64.tar.gz
+      darwin/arm64: protobuf-javascript-{version}-osx-aarch_64.tar.gz
+      windows/amd64: protobuf-javascript-{version}-win64.zip
+
+  # kind bazel: a C++ target built by bazel from an upstream source
+  # archive, on a runner of each platform (no cross-compilation);
+  # the versions discovered from the repository's releases. The
+  # Linux executables link glibc and libstdc++: base applies.
+  # windows/arm64 is not served: no bazel C++ toolchain is
+  # established for it.
+  grpc/web:
+    source: https://github.com/grpc/grpc-web
+    kind: bazel
+    repository: grpc/grpc-web
+    tag: "{version}"
+    archive: https://github.com/grpc/grpc-web/releases/download/{version}/grpc-web-source-{version}.tar.gz
+    strip: 0
+    target: //javascript/net/grpc/web/generator:protoc-gen-grpc-web
+    output: bazel-bin/javascript/net/grpc/web/generator/protoc-gen-grpc-web{exe}
+    entrypoint: protoc-gen-grpc-web
+    platforms: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64]
+  protocolbuffers/csharp:
+    source: https://github.com/protocolbuffers/protobuf
+    kind: bazel
+    repository: protocolbuffers/protobuf
+    tag: v{version}
+    archive: https://github.com/protocolbuffers/protobuf/releases/download/v{version}/protobuf-{version}.tar.gz
+    strip: 1
+    files: plugins
+    target: //plugins:protoc-gen-csharp
+    output: bazel-bin/plugins/protoc-gen-csharp{exe}
+    entrypoint: protoc-gen-csharp
+    platforms: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64]
+  grpc/csharp:
+    source: https://github.com/grpc/grpc
+    kind: bazel
+    repository: grpc/grpc
+    tag: v{version}
+    archive: https://github.com/grpc/grpc/archive/refs/tags/v{version}.tar.gz
+    strip: 1
+    target: //src/compiler:grpc_csharp_plugin
+    output: bazel-bin/src/compiler/grpc_csharp_plugin{exe}
+    entrypoint: grpc_csharp_plugin
+    platforms: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64]
