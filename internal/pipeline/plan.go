@@ -66,11 +66,12 @@ type Plan struct {
 	Any bool `json:"any"`
 }
 
-// Exists reports whether a reference's tag is already published.
+// Exists reports whether a reference's tag is already published and
+// signed; one published but unsigned is not done.
 type Exists func(ctx context.Context, reference string) (bool, error)
 
-// Compute plans every plugin version the registry lacks, or every
-// version where all is set: a native kind one tree job per platform
+// Compute plans every plugin version the registry lacks a signed
+// list for, or every version where all is set: a native kind one tree job per platform
 // on its runner and one build, another kind one cross job for all
 // platforms on CrossRunner. A registry that cannot answer fails the
 // plan, so nothing is silently skipped.

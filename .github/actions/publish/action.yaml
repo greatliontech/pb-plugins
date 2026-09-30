@@ -38,7 +38,11 @@ runs:
         echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       env:
         GOPRIVATE: github.com/greatliontech/*
+    # cosign 2: its default carrier is the signature tag the tool
+    # looks for.
     - uses: sigstore/cosign-installer@v3
+      with:
+        cosign-release: v2.5.2
     - name: Registry credentials
       shell: bash
       run: |

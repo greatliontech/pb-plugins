@@ -101,8 +101,11 @@ func TestParseReport(t *testing.T) {
 	}
 }
 
+// fakeRegistry holds the tags that exist (signature tags among
+// them) and the digest each published tag names.
 type fakeRegistry struct {
-	sigs map[string]bool
+	tags    map[string]bool
+	digests map[string]string
 }
 
 func (f fakeRegistry) PlatformImage(_ context.Context, ref, platform string) (string, error) {
@@ -110,7 +113,15 @@ func (f fakeRegistry) PlatformImage(_ context.Context, ref, platform string) (st
 	return repo + "@sha256:" + strings.ReplaceAll(platform, "/", "") + "0000", nil
 }
 
-func (f fakeRegistry) TagExists(_ context.Context, ref string) (bool, error) { return f.sigs[ref], nil }
+func (f fakeRegistry) TagExists(_ context.Context, ref string) (bool, error) { return f.tags[ref], nil }
+
+func (f fakeRegistry) Digest(_ context.Context, ref string) (string, error) {
+	d, ok := f.digests[ref]
+	if !ok {
+		return "", errors.New("no such tag")
+	}
+	return d, nil
+}
 
 // fakeTool writes a shell script that records its arguments and
 // prints the report given.
@@ -149,7 +160,7 @@ func TestPublish(t *testing.T) {
 	pb, pbLog := fakeTool(t, dir, "pb", ref+"@sha256:1111 published\\n")
 	cosign, cosignLog := fakeTool(t, dir, "cosign", "")
 	var out strings.Builder
-	reg := fakeRegistry{sigs: map[string]bool{}}
+	reg := fakeRegistry{tags: map[string]bool{}, digests: map[string]string{}}
 	p := &Publisher{Catalog: c, Registry: reg, PB: pb, Cosign: cosign, Trees: trees, Out: &out}
 	if err := p.Publish(context.Background(), "protocolbuffers/js", "v4.0.3"); err != nil {
 		t.Fatal(err)
@@ -172,7 +183,7 @@ func TestPublish(t *testing.T) {
 	}
 	sig, _ := os.ReadFile(cosignLog)
 	repo, _, _ := strings.Cut(ref, ":v")
-	if string(sig) != "sign --yes --recursive --new-bundle-format=false "+repo+"@sha256:1111\n" {
+	if string(sig) != "sign --yes --recursive "+repo+"@sha256:1111\n" {
 		t.Errorf("cosign args %q", sig)
 	}
 	if !strings.Contains(out.String(), "published") || !strings.Contains(out.String(), "@sha256:1111 signed\n") {
@@ -181,7 +192,7 @@ func TestPublish(t *testing.T) {
 
 	// Signed already: cosign is not run.
 	os.Remove(cosignLog)
-	reg.sigs[repo+":sha256-1111.sig"] = true
+	reg.tags[repo+":sha256-1111.sig"] = true
 	out.Reset()
 	if err := p.Publish(context.Background(), "protocolbuffers/js", "v4.0.3"); err != nil {
 		t.Fatal(err)
@@ -205,6 +216,33 @@ func TestPublish(t *testing.T) {
 	if _, err := os.Stat(pbLog); err == nil {
 		t.Error("pb ran without every tree")
 	}
+
+	// A tag published already is not built again: its digest is read
+	// and signed where unsigned, and left alone where signed.
+	os.Remove(pbLog)
+	os.Remove(cosignLog)
+	reg.tags[ref] = true
+	reg.digests[ref] = "sha256:3333"
+	out.Reset()
+	if err := p.Publish(context.Background(), "protocolbuffers/js", "v4.0.3"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(pbLog); err == nil {
+		t.Error("pb ran over a published tag")
+	}
+	sig, _ = os.ReadFile(cosignLog)
+	if string(sig) != "sign --yes --recursive "+repo+"@sha256:3333\n" || !strings.Contains(out.String(), "@sha256:3333 published already") {
+		t.Errorf("published tag: cosign %q, report %q", sig, out.String())
+	}
+	reg.tags[repo+":sha256-3333.sig"] = true
+	os.Remove(cosignLog)
+	if err := p.Publish(context.Background(), "protocolbuffers/js", "v4.0.3"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(cosignLog); err == nil {
+		t.Error("cosign ran over a published, signed tag")
+	}
+	delete(reg.tags, ref)
 
 	// The go kind takes no base.
 	for _, pl := range c.Plugins["protocolbuffers/go"].PlatformsOf() {

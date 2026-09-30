@@ -15,10 +15,11 @@ import (
 )
 
 // Registry is what publishing asks the registry: the platform image
-// of the base's index, and whether a signature tag exists.
+// of the base's index, whether a tag exists, and a tag's digest.
 type Registry interface {
 	PlatformImage(ctx context.Context, reference, platform string) (string, error)
 	TagExists(ctx context.Context, reference string) (bool, error)
+	Digest(ctx context.Context, reference string) (string, error)
 }
 
 // Publisher publishes one plugin version from its trees.
@@ -39,15 +40,26 @@ type Publisher struct {
 // serves must have its tree; a Linux tree of a kind needing the base
 // is layered over the base's image for its platform), then signs the
 // list and its images keyless with cosign where the list's digest
-// carries no signature tag yet: a publish signed once is not signed
-// again, and a tag published by a run that died before signing is
-// signed by the next.
+// carries no signature tag yet. A tag already published is not
+// built again — a tag means one list forever, and a rebuilt tree
+// need not reproduce its digest — but signed where a run died
+// before signing it; a publish signed once is not signed again.
 func (p *Publisher) Publish(ctx context.Context, name, version string) error {
 	pl, ok := p.Catalog.Plugins[name]
 	if !ok {
 		return fmt.Errorf("%s: not in the catalog", name)
 	}
 	ref := p.Catalog.Reference(name, version)
+	if published, err := p.Registry.TagExists(ctx, ref); err != nil {
+		return err
+	} else if published {
+		digest, err := p.Registry.Digest(ctx, ref)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(p.Out, "%s@%s published already\n", ref, digest)
+		return p.sign(ctx, ref, digest)
+	}
 	args := []string{"plugin", "build", ref, "--entrypoint", "/" + pl.Entrypoint}
 	for _, platform := range pl.PlatformsOf() {
 		tree := recipe.TreeDir(p.Trees, platform)
@@ -68,7 +80,13 @@ func (p *Publisher) Publish(ctx context.Context, name, version string) error {
 		return err
 	}
 	fmt.Fprint(p.Out, report)
-	subject := strings.SplitN(ref, ":", 2)[0]
+	return p.sign(ctx, ref, digest)
+}
+
+// sign signs the list at digest and its images keyless where the
+// digest carries no signature tag yet.
+func (p *Publisher) sign(ctx context.Context, ref, digest string) error {
+	subject := ref
 	if i := strings.LastIndex(ref, ":"); i > 0 {
 		subject = ref[:i]
 	}
@@ -85,10 +103,11 @@ func (p *Publisher) Publish(ctx context.Context, name, version string) error {
 	if cosign == "" {
 		cosign = "cosign"
 	}
-	// The legacy carrier, the signature tag, so the signature's
-	// presence is a tag's; the bundle rides its annotations, so the
-	// verification pb runs is offline.
-	cmd := exec.CommandContext(ctx, cosign, "sign", "--yes", "--recursive", "--new-bundle-format=false", subject)
+	// cosign 2's default carrier is the signature tag, so the
+	// signature's presence is a tag's; the bundle rides its
+	// annotations, so the verification pb runs is offline. The
+	// workflow pins cosign 2, whose default this is.
+	cmd := exec.CommandContext(ctx, cosign, "sign", "--yes", "--recursive", subject)
 	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
 	fmt.Fprintf(os.Stderr, "+ %s\n", strings.Join(cmd.Args, " "))
 	if err := cmd.Run(); err != nil {

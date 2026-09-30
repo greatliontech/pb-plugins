@@ -63,7 +63,7 @@ func run(ctx context.Context, args []string) error {
 		fmt.Printf("%d plugins, %d versions\n", len(c.Plugins), countVersions(c))
 		return nil
 	case "plan":
-		plan, err := pipeline.Compute(ctx, c, registry.New().TagExists, *all)
+		plan, err := pipeline.Compute(ctx, c, registry.New().Signed, *all)
 		if err != nil {
 			return err
 		}

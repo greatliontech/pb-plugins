@@ -46,6 +46,44 @@ func (c *Client) TagExists(ctx context.Context, reference string) (bool, error) 
 	return false, fmt.Errorf("%s: %w", reference, err)
 }
 
+// Digest is the digest of the manifest a reference names, as the
+// registry answers it; a tag naming nothing is an error.
+func (c *Client) Digest(ctx context.Context, reference string) (string, error) {
+	ref, err := name.ParseReference(reference)
+	if err != nil {
+		return "", err
+	}
+	desc, err := remote.Head(ref, append(c.opts, remote.WithContext(ctx))...)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", reference, err)
+	}
+	return desc.Digest.String(), nil
+}
+
+// Signed reports whether a tag is published and its list's digest
+// carries cosign's signature tag: what the plan takes as done. A tag
+// published by a run that died before signing is not done, and the
+// next run signs it.
+func (c *Client) Signed(ctx context.Context, reference string) (bool, error) {
+	ok, err := c.TagExists(ctx, reference)
+	if err != nil || !ok {
+		return false, err
+	}
+	digest, err := c.Digest(ctx, reference)
+	if err != nil {
+		return false, err
+	}
+	repo := reference
+	if i := strings.LastIndex(reference, ":"); i > strings.LastIndex(reference, "/") {
+		repo = reference[:i]
+	}
+	sig, err := SignatureTag(repo + "@" + digest)
+	if err != nil {
+		return false, err
+	}
+	return c.TagExists(ctx, sig)
+}
+
 // PlatformImage resolves an index reference, `<repository>@<digest>`,
 // to the digest of its image for the platform: `<repository>@<image
 // digest>`. The reference must name an index holding exactly one
