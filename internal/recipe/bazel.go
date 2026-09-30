@@ -57,11 +57,7 @@ func buildBazel(ctx context.Context, c *catalog.Catalog, name string, p *catalog
 	if _, err := exec.LookPath(bazel); err != nil {
 		bazel = "bazel"
 	}
-	args := []string{}
-	if runtime.GOOS == "windows" {
-		args = append(args, "--output_user_root=C:/b/out")
-	}
-	args = append(args, "--host_jvm_args=-Djava.net.preferIPv4Stack=true", "build", "-c", "opt", p.Target)
+	args := bazelArgs(p, runtime.GOOS)
 	// A source tree's own `tools/bazel` wrapper is a shell script,
 	// which bazelisk cannot run on windows; bazelisk runs the bazel
 	// the tree's .bazelversion names directly instead.
@@ -77,6 +73,20 @@ func buildBazel(ctx context.Context, c *catalog.Catalog, name string, p *catalog
 	// so the source tree can be removed.
 	_ = run(ctx, src, env, bazel, "shutdown")
 	return nil
+}
+
+// bazelArgs composes the build: the recipe's startup options for the
+// operating system, the output root kept short on windows, then
+// `build -c opt` with the recipe's build options and the target.
+func bazelArgs(p *catalog.Plugin, goos string) []string {
+	opts := p.Options[goos]
+	args := append([]string{}, opts.Startup...)
+	if goos == "windows" {
+		args = append(args, "--output_user_root=C:/b/out")
+	}
+	args = append(args, "--host_jvm_args=-Djava.net.preferIPv4Stack=true", "build", "-c", "opt")
+	args = append(args, opts.Build...)
+	return append(args, p.Target)
 }
 
 // extractTarInto fetches a gzip-compressed tar and extracts its

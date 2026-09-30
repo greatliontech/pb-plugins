@@ -1,0 +1,49 @@
+# Publishes one plugin version from the trees under `trees/`: pb is
+# built from its repository at the pinned commit (the organization's
+# modules are private, read with the app's token, and pb's module
+# carries a replace, which `go install` of a module at a version
+# refuses), cosign installed, the registry's credentials written to
+# the ambient store, then `catalog publish`.
+name: publish
+description: publish one plugin version from its trees
+inputs:
+  plugin:
+    required: true
+  version:
+    required: true
+  app-id:
+    required: true
+  app-key:
+    required: true
+  pb-commit:
+    required: true
+  token:
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: actions/create-github-app-token@v2
+      id: app-token
+      with:
+        app-id: ${{ inputs.app-id }}
+        private-key: ${{ inputs.app-key }}
+        owner: greatliontech
+    - name: Build pb
+      shell: bash
+      run: |
+        git config --global url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/".insteadOf "https://github.com/"
+        git clone --quiet https://github.com/greatliontech/pb.git "$RUNNER_TEMP/pb"
+        git -C "$RUNNER_TEMP/pb" checkout --quiet "${{ inputs.pb-commit }}"
+        (cd "$RUNNER_TEMP/pb" && go build -o "$RUNNER_TEMP/bin/pb" ./cmd/pb)
+        echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      env:
+        GOPRIVATE: github.com/greatliontech/*
+    - uses: sigstore/cosign-installer@v3
+    - name: Registry credentials
+      shell: bash
+      run: |
+        mkdir -p ~/.docker
+        printf '{"auths":{"ghcr.io":{"auth":"%s"}}}' "$(printf '%s:%s' "$GITHUB_ACTOR" "${{ inputs.token }}" | base64 -w0)" > ~/.docker/config.json
+    - name: Publish and sign
+      shell: bash
+      run: go run ./cmd/catalog publish "${{ inputs.plugin }}" "${{ inputs.version }}" --trees trees

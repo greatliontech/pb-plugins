@@ -81,10 +81,21 @@ type Plugin struct {
 	Files   string `yaml:"files"`
 	Target  string `yaml:"target"`
 	Output  string `yaml:"output"`
+	// Options are a bazel recipe's options per operating system
+	// (`linux`, `darwin`, `windows`): what a platform's build needs
+	// beyond the source's own rc files, or in place of them.
+	Options map[string]BazelOptions `yaml:"options"`
 
 	// Versions are the tags published, ascending, read from
 	// plugins/<name>/versions.
 	Versions []string `yaml:"-"`
+}
+
+// BazelOptions are bazel's startup options and build options for one
+// operating system.
+type BazelOptions struct {
+	Startup []string `yaml:"startup"`
+	Build   []string `yaml:"build"`
 }
 
 // Catalog is the catalog read whole.
@@ -222,21 +233,21 @@ func (c *Catalog) Validate() error {
 			if p.Module == "" || p.Package == "" {
 				fail(name, "go: module and package required")
 			}
-			if p.Repository != "" || p.Tag != "" || p.Assets != nil || p.Member != "" || p.Archive != "" || p.Files != "" || p.Target != "" || p.Output != "" {
+			if p.Repository != "" || p.Tag != "" || p.Assets != nil || p.Member != "" || p.Archive != "" || p.Files != "" || p.Target != "" || p.Output != "" || p.Options != nil {
 				fail(name, "go: a field of another kind set")
 			}
 		case KindNode:
 			if p.Package == "" {
 				fail(name, "node: package required")
 			}
-			if p.Module != "" || p.Repository != "" || p.Tag != "" || p.Assets != nil || p.Member != "" || p.Archive != "" || p.Files != "" || p.Target != "" || p.Output != "" {
+			if p.Module != "" || p.Repository != "" || p.Tag != "" || p.Assets != nil || p.Member != "" || p.Archive != "" || p.Files != "" || p.Target != "" || p.Output != "" || p.Options != nil {
 				fail(name, "node: a field of another kind set")
 			}
 		case KindRelease:
 			if !repoRE.MatchString(p.Repository) || !strings.Contains(p.Tag, "{version}") || len(p.Assets) == 0 || p.Member == "" {
 				fail(name, "release: repository, tag with {version}, assets and member required")
 			}
-			if p.Platforms != nil || p.Module != "" || p.Package != "" || p.Archive != "" || p.Files != "" || p.Target != "" || p.Output != "" {
+			if p.Platforms != nil || p.Module != "" || p.Package != "" || p.Archive != "" || p.Files != "" || p.Target != "" || p.Output != "" || p.Options != nil {
 				fail(name, "release: a field of another kind set (platforms are the assets' keys)")
 			}
 			platforms = make([]string, 0, len(p.Assets))
@@ -256,6 +267,11 @@ func (c *Catalog) Validate() error {
 			}
 			if p.Strip < 0 {
 				fail(name, "bazel: strip negative")
+			}
+			for os := range p.Options {
+				if os != "linux" && os != "darwin" && os != "windows" {
+					fail(name, "bazel: options for %q, no operating system", os)
+				}
 			}
 		default:
 			fail(name, "unknown kind %q", p.Kind)

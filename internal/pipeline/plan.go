@@ -53,8 +53,12 @@ type Matrix[T any] struct {
 	Include []T `json:"include"`
 }
 
-// Plan is what a run builds and publishes.
+// Plan is what a run builds and publishes: Cross the cross-building
+// kinds' jobs, each building every platform and publishing at once;
+// Trees the native kinds' one-platform jobs and Builds their publish
+// jobs.
 type Plan struct {
+	Cross  Matrix[Tree]  `json:"cross"`
 	Trees  Matrix[Tree]  `json:"trees"`
 	Builds Matrix[Build] `json:"builds"`
 	// Any reports whether there is anything to do, for the workflow's
@@ -67,9 +71,9 @@ type Exists func(ctx context.Context, reference string) (bool, error)
 
 // Compute plans every plugin version the registry lacks, or every
 // version where all is set: a native kind one tree job per platform
-// on its runner, another kind one job for all platforms on
-// CrossRunner, and one build per version. A registry that cannot
-// answer fails the plan, so nothing is silently skipped.
+// on its runner and one build, another kind one cross job for all
+// platforms on CrossRunner. A registry that cannot answer fails the
+// plan, so nothing is silently skipped.
 func Compute(ctx context.Context, c *catalog.Catalog, exists Exists, all bool) (*Plan, error) {
 	plan := &Plan{}
 	for _, name := range c.Names() {
@@ -86,8 +90,8 @@ func Compute(ctx context.Context, c *catalog.Catalog, exists Exists, all bool) (
 				}
 			}
 			build := BuildID(name, v)
-			plan.Builds.Include = append(plan.Builds.Include, Build{Plugin: name, Version: v, Build: build})
 			if p.Kind.Native() {
+				plan.Builds.Include = append(plan.Builds.Include, Build{Plugin: name, Version: v, Build: build})
 				for _, pl := range p.PlatformsOf() {
 					os, arch := catalog.SplitPlatform(pl)
 					plan.Trees.Include = append(plan.Trees.Include, Tree{
@@ -96,14 +100,14 @@ func Compute(ctx context.Context, c *catalog.Catalog, exists Exists, all bool) (
 					})
 				}
 			} else {
-				plan.Trees.Include = append(plan.Trees.Include, Tree{
+				plan.Cross.Include = append(plan.Cross.Include, Tree{
 					Plugin: name, Version: v, Kind: string(p.Kind), Platforms: strings.Join(p.PlatformsOf(), ","),
 					Runner: CrossRunner, Build: build, Tree: build + "-cross",
 				})
 			}
 		}
 	}
-	plan.Any = len(plan.Builds.Include) > 0
+	plan.Any = len(plan.Builds.Include)+len(plan.Cross.Include) > 0
 	return plan, nil
 }
 
@@ -117,6 +121,9 @@ func BuildID(name, version string) string {
 // String renders the plan for a reader.
 func (p *Plan) String() string {
 	var b strings.Builder
+	for _, t := range p.Cross.Include {
+		fmt.Fprintf(&b, "cross %s on %s: %s\n", t.Build, t.Runner, t.Platforms)
+	}
 	for _, t := range p.Trees.Include {
 		fmt.Fprintf(&b, "tree %s on %s: %s\n", t.Tree, t.Runner, t.Platforms)
 	}

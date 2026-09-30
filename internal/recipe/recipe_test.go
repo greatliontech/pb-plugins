@@ -216,3 +216,18 @@ func TestGoKindLive(t *testing.T) {
 		}
 	}
 }
+
+// The bazel command carries the operating system's startup options
+// first, the short output root on windows, then the build with its
+// options and the target.
+func TestBazelArgs(t *testing.T) {
+	p := &catalog.Plugin{Target: "//t", Options: map[string]catalog.BazelOptions{
+		"windows": {Startup: []string{"--noworkspace_rc"}, Build: []string{"--config=windows"}},
+	}}
+	if got := strings.Join(bazelArgs(p, "windows"), " "); got != "--noworkspace_rc --output_user_root=C:/b/out --host_jvm_args=-Djava.net.preferIPv4Stack=true build -c opt --config=windows //t" {
+		t.Errorf("windows: %s", got)
+	}
+	if got := strings.Join(bazelArgs(p, "linux"), " "); got != "--host_jvm_args=-Djava.net.preferIPv4Stack=true build -c opt //t" {
+		t.Errorf("linux: %s", got)
+	}
+}

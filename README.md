@@ -46,11 +46,13 @@ kinds run under the docker runner while the Go plugins run natively.
 ## Pipeline
 
 - `publish` (push to `main`, or by hand): `catalog plan` lists the
-  versions whose tag the registry lacks; one tree job per (version,
-  runner) builds the trees and uploads them; one publish job per
-  version downloads them and runs `catalog publish`, which composes
-  `pb plugin build` from the catalog, then `cosign sign --recursive`
-  keyless over the list's digest where no signature tag exists yet.
+  versions whose tag the registry lacks; a cross-building kind
+  builds its platforms and publishes in one job; a native kind builds
+  one tree job per platform on that platform's runner, and a publish
+  job downloads them once all are built. Publishing is `catalog
+  publish`: `pb plugin build` composed from the catalog, then `cosign
+  sign --recursive` keyless over the list's digest where no signature
+  tag exists yet.
   A published tag is never rebuilt: the plan leaves it out and pb
   refuses to publish over it. pb itself is built from its repository
   at the commit the `PB_COMMIT` variable names.

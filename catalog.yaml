@@ -88,6 +88,11 @@ plugins:
     output: bazel-bin/javascript/net/grpc/web/generator/protoc-gen-grpc-web{exe}
     entrypoint: protoc-gen-grpc-web
     platforms: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64]
+    # The source's rc passes a GCC warning flag MSVC refuses to every
+    # compile ("common build settings for unix-like systems").
+    options:
+      windows:
+        startup: [--noworkspace_rc]
   protocolbuffers/csharp:
     source: https://github.com/protocolbuffers/protobuf
     kind: bazel
@@ -100,6 +105,10 @@ plugins:
     output: bazel-bin/plugins/protoc-gen-csharp{exe}
     entrypoint: protoc-gen-csharp
     platforms: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64]
+    # protobuf's own windows configuration: clang-cl, as its CI builds.
+    options:
+      windows:
+        build: [--config=windows]
   grpc/csharp:
     source: https://github.com/grpc/grpc
     kind: bazel
@@ -111,3 +120,7 @@ plugins:
     output: bazel-bin/src/compiler/grpc_csharp_plugin{exe}
     entrypoint: grpc_csharp_plugin
     platforms: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64]
+    # grpc's own windows configuration: MSVC's C++17 flag spelling.
+    options:
+      windows:
+        build: [--config=windows]

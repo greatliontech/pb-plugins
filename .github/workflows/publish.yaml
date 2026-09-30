@@ -1,8 +1,9 @@
 # Publishes every plugin version the registry lacks: the plan reads
-# the registry, one tree job per (plugin version, runner) builds the
-# platform trees and uploads them, and one publish job per plugin
-# version packages them into a list through `pb plugin build` and
-# signs it keyless. A tag once published is never rebuilt: the plan
+# the registry; a cross-building kind builds its platforms and
+# publishes in one job; a native kind builds one tree job per
+# platform on that platform's runner and a publish job packages them
+# once all are built. Publishing is `pb plugin build` into one list,
+# signed keyless. A tag once published is never rebuilt: the plan
 # leaves it out, and pb refuses to publish over it.
 name: publish
 
@@ -27,6 +28,7 @@ jobs:
   plan:
     runs-on: ubuntu-24.04
     outputs:
+      cross: ${{ steps.plan.outputs.cross }}
       trees: ${{ steps.plan.outputs.trees }}
       builds: ${{ steps.plan.outputs.builds }}
       any: ${{ steps.plan.outputs.any }}
@@ -45,19 +47,23 @@ jobs:
         run: |
           go run ./cmd/catalog plan
           go run ./cmd/catalog plan --json > plan.json
+          echo "cross=$(jq -c .cross plan.json)" >> "$GITHUB_OUTPUT"
           echo "trees=$(jq -c .trees plan.json)" >> "$GITHUB_OUTPUT"
           echo "builds=$(jq -c .builds plan.json)" >> "$GITHUB_OUTPUT"
           echo "any=$(jq -r .any plan.json)" >> "$GITHUB_OUTPUT"
 
-  tree:
+  # A cross-building kind builds every platform on one runner and
+  # publishes at once; a native kind builds one platform per runner
+  # and publishes below, once its trees are all built.
+  cross:
     needs: plan
-    if: needs.plan.outputs.any == 'true'
+    if: needs.plan.outputs.any == 'true' && fromJSON(needs.plan.outputs.cross).include[0] != null
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.plan.outputs.trees) }}
+      matrix: ${{ fromJSON(needs.plan.outputs.cross) }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 300
-    name: tree ${{ matrix.tree }}
+    timeout-minutes: 60
+    name: publish ${{ matrix.build }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -71,6 +77,33 @@ jobs:
         run: go run ./cmd/catalog tree "${{ matrix.plugin }}" "${{ matrix.version }}" --platform "${{ matrix.platforms }}" --out trees
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: ./.github/actions/publish
+        with:
+          plugin: ${{ matrix.plugin }}
+          version: ${{ matrix.version }}
+          app-id: ${{ vars.GLT_RELEASER_APP_ID }}
+          app-key: ${{ secrets.GLT_RELEASER_APP_KEY }}
+          pb-commit: ${{ vars.PB_COMMIT || 'main' }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  tree:
+    needs: plan
+    if: needs.plan.outputs.any == 'true' && fromJSON(needs.plan.outputs.trees).include[0] != null
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.trees) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 300
+    name: tree ${{ matrix.tree }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build the tree
+        run: go run ./cmd/catalog tree "${{ matrix.plugin }}" "${{ matrix.version }}" --platform "${{ matrix.platforms }}" --out trees
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/upload-artifact@v4
         with:
           name: tree-${{ matrix.tree }}
@@ -78,12 +111,12 @@ jobs:
           if-no-files-found: error
           retention-days: 3
 
-  # Each plugin version publishes once its own trees are all built:
-  # another version's failed tree job stops nothing here, and a
-  # missing tree fails this job at the download.
+  # Each native plugin version publishes once its own trees are all
+  # built: another version's failed tree job stops nothing here, and
+  # a missing tree fails this job at the download.
   publish:
     needs: [plan, tree]
-    if: needs.plan.outputs.any == 'true' && !cancelled()
+    if: needs.plan.outputs.any == 'true' && !cancelled() && fromJSON(needs.plan.outputs.builds).include[0] != null
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.builds) }}
@@ -100,32 +133,11 @@ jobs:
           pattern: tree-${{ matrix.build }}-*
           path: trees
           merge-multiple: true
-      # pb is built from its repository at the pinned commit: the
-      # organization's modules are private, read with the app's
-      # token, and pb's module carries a replace, which `go install`
-      # of a module at a version refuses.
-      - uses: actions/create-github-app-token@v2
-        id: app-token
+      - uses: ./.github/actions/publish
         with:
+          plugin: ${{ matrix.plugin }}
+          version: ${{ matrix.version }}
           app-id: ${{ vars.GLT_RELEASER_APP_ID }}
-          private-key: ${{ secrets.GLT_RELEASER_APP_KEY }}
-          owner: greatliontech
-      - name: Build pb
-        run: |
-          git config --global url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/".insteadOf "https://github.com/"
-          git clone --quiet https://github.com/greatliontech/pb.git "$RUNNER_TEMP/pb"
-          git -C "$RUNNER_TEMP/pb" checkout --quiet "$PB_COMMIT"
-          (cd "$RUNNER_TEMP/pb" && go build -o "$RUNNER_TEMP/bin/pb" ./cmd/pb)
-          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-        env:
-          GOPRIVATE: github.com/greatliontech/*
-          PB_COMMIT: ${{ vars.PB_COMMIT || 'main' }}
-      - uses: sigstore/cosign-installer@v3
-      - name: Registry credentials
-        run: |
-          mkdir -p ~/.docker
-          printf '{"auths":{"ghcr.io":{"auth":"%s"}}}' "$(printf '%s:%s' "$GITHUB_ACTOR" "$GITHUB_TOKEN" | base64 -w0)" > ~/.docker/config.json
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Publish and sign
-        run: go run ./cmd/catalog publish "${{ matrix.plugin }}" "${{ matrix.version }}" --trees trees
+          app-key: ${{ secrets.GLT_RELEASER_APP_KEY }}
+          pb-commit: ${{ vars.PB_COMMIT || 'main' }}
+          token: ${{ secrets.GITHUB_TOKEN }}

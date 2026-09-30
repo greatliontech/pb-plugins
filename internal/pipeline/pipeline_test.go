@@ -37,7 +37,7 @@ func TestPlan(t *testing.T) {
 	for _, b := range plan.Builds.Include {
 		builds[b.Build] = true
 	}
-	if builds["protocolbuffers-go-v1.36.12"] || !builds["grpc-web-v2.1.1"] || !builds["bufbuild-es-v2.15.0"] {
+	if builds["protocolbuffers-go-v1.36.12"] || !builds["grpc-web-v2.1.1"] || builds["bufbuild-es-v2.15.0"] {
 		t.Errorf("builds %v", builds)
 	}
 	var web, es []Tree
@@ -46,7 +46,15 @@ func TestPlan(t *testing.T) {
 		case "grpc-web-v2.1.1":
 			web = append(web, tr)
 		case "bufbuild-es-v2.15.0":
+			t.Errorf("a cross kind among the native trees: %+v", tr)
+		}
+	}
+	for _, tr := range plan.Cross.Include {
+		switch tr.Build {
+		case "bufbuild-es-v2.15.0":
 			es = append(es, tr)
+		case "protocolbuffers-go-v1.36.12", "grpc-web-v2.1.1":
+			t.Errorf("wrong cross job %+v", tr)
 		}
 	}
 	if len(web) != 5 || web[0].Platforms != "linux/amd64" || web[0].Runner != "ubuntu-24.04" || web[3].Runner != "macos-15" || web[4].Tree != "grpc-web-v2.1.1-windows-amd64" {
@@ -62,12 +70,12 @@ func TestPlan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all.Builds.Include) != len(plan.Builds.Include)+1 {
-		t.Errorf("--all: %d builds, filtered %d", len(all.Builds.Include), len(plan.Builds.Include))
+	if len(all.Cross.Include) != len(plan.Cross.Include)+1 || len(all.Builds.Include) != len(plan.Builds.Include) {
+		t.Errorf("--all: %d cross, %d builds; filtered %d, %d", len(all.Cross.Include), len(all.Builds.Include), len(plan.Cross.Include), len(plan.Builds.Include))
 	}
 	every := func(context.Context, string) (bool, error) { return true, nil }
 	none, err := Compute(context.Background(), c, every, false)
-	if err != nil || none.Any || len(none.Trees.Include) != 0 || !strings.Contains(none.String(), "nothing to build") {
+	if err != nil || none.Any || len(none.Trees.Include) != 0 || len(none.Cross.Include) != 0 || !strings.Contains(none.String(), "nothing to build") {
 		t.Errorf("all published: %v %+v", err, none)
 	}
 	broken := func(context.Context, string) (bool, error) { return false, errors.New("registry down") }
