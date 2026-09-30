@@ -62,7 +62,11 @@ func buildBazel(ctx context.Context, c *catalog.Catalog, name string, p *catalog
 		args = append(args, "--output_user_root=C:/b/out")
 	}
 	args = append(args, "--host_jvm_args=-Djava.net.preferIPv4Stack=true", "build", "-c", "opt", p.Target)
-	if err := run(ctx, src, nil, bazel, args...); err != nil {
+	// A source tree's own `tools/bazel` wrapper is a shell script,
+	// which bazelisk cannot run on windows; bazelisk runs the bazel
+	// the tree's .bazelversion names directly instead.
+	env := []string{"BAZELISK_SKIP_WRAPPER=true"}
+	if err := run(ctx, src, env, bazel, args...); err != nil {
 		return err
 	}
 	built := filepath.Join(src, filepath.FromSlash(catalog.Expand(p.Output, version, pl)))
@@ -71,7 +75,7 @@ func buildBazel(ctx context.Context, c *catalog.Catalog, name string, p *catalog
 	}
 	// The build's server holds the output base open; it is stopped
 	// so the source tree can be removed.
-	_ = run(ctx, src, nil, bazel, "shutdown")
+	_ = run(ctx, src, env, bazel, "shutdown")
 	return nil
 }
 

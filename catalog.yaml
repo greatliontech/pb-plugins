@@ -83,7 +83,7 @@ plugins:
     repository: grpc/grpc-web
     tag: "{version}"
     archive: https://github.com/grpc/grpc-web/releases/download/{version}/grpc-web-source-{version}.tar.gz
-    strip: 0
+    strip: 1
     target: //javascript/net/grpc/web/generator:protoc-gen-grpc-web
     output: bazel-bin/javascript/net/grpc/web/generator/protoc-gen-grpc-web{exe}
     entrypoint: protoc-gen-grpc-web

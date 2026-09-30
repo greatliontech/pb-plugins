@@ -36,6 +36,12 @@ func Build(ctx context.Context, c *catalog.Catalog, name, version string, platfo
 	if !ok {
 		return fmt.Errorf("%s: not in the catalog", name)
 	}
+	// The builders run their tools in a throwaway directory, so the
+	// trees' location is fixed before any of them runs.
+	out, err := filepath.Abs(out)
+	if err != nil {
+		return err
+	}
 	served := map[string]bool{}
 	for _, pl := range p.PlatformsOf() {
 		served[pl] = true
