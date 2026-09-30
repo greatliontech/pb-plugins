@@ -117,7 +117,9 @@ plugins:
     archive: https://github.com/grpc/grpc/archive/refs/tags/v{version}.tar.gz
     strip: 1
     target: //src/compiler:grpc_csharp_plugin
-    output: bazel-bin/src/compiler/grpc_csharp_plugin_binary{exe}
+    # The output is a copy of the linked binary, carrying no .exe on
+    # windows either.
+    output: bazel-bin/src/compiler/grpc_csharp_plugin_binary
     entrypoint: grpc_csharp_plugin
     platforms: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64]
     # grpc's own windows configuration: MSVC's C++17 flag spelling.
