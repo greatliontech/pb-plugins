@@ -1,0 +1,3 @@
+# A checkout keeps LF on every system: gofmt reads the files as the
+# repository holds them.
+* text=auto eol=lf
