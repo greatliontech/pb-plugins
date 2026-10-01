@@ -129,10 +129,12 @@ func TestExtractTarInto(t *testing.T) {
 	if b, _ := os.ReadFile(filepath.Join(dir, "BUILD")); string(b) != "b" {
 		t.Errorf("BUILD %q", b)
 	}
-	if fi, err := os.Stat(filepath.Join(dir, "src", "bin", "x")); err != nil || fi.Mode()&0o111 == 0 {
+	// windows has no executable bit, and spells a link's target with
+	// its own separator.
+	if fi, err := os.Stat(filepath.Join(dir, "src", "bin", "x")); err != nil || (runtime.GOOS != "windows" && fi.Mode()&0o111 == 0) {
 		t.Errorf("bin/x: %v %v", fi, err)
 	}
-	if target, err := os.Readlink(filepath.Join(dir, "src", "link")); err != nil || target != "bin/x" {
+	if target, err := os.Readlink(filepath.Join(dir, "src", "link")); err != nil || filepath.ToSlash(target) != "bin/x" {
 		t.Errorf("link %q %v", target, err)
 	}
 	if err := extractTarInto(context.Background(), srv.URL+"/escape.tar.gz", 1, t.TempDir()); err == nil || !strings.Contains(err.Error(), "escapes") {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -130,6 +131,12 @@ func fakeTool(t *testing.T, dir, name, report string) (path, log string) {
 	log = filepath.Join(dir, name+".log")
 	path = filepath.Join(dir, name)
 	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + log + "\nprintf '" + report + "'\n"
+	if runtime.GOOS == "windows" {
+		// A batch file: the arguments as one line to the log, the
+		// report (one line, its own line break) to standard output.
+		path += ".cmd"
+		script = "@echo off\r\necho %* >> \"" + log + "\"\r\necho " + strings.TrimSuffix(report, "\\n") + "\r\n"
+	}
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
