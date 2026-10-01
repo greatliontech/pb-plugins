@@ -57,17 +57,34 @@ func Build(ctx context.Context, c *catalog.Catalog, name, version string, platfo
 			return err
 		}
 	}
-	switch p.Kind {
-	case catalog.KindGo:
-		return buildGo(ctx, p, version, platforms, out)
-	case catalog.KindNode:
-		return buildNode(ctx, p, version, platforms, out)
-	case catalog.KindRelease:
-		return buildRelease(ctx, p, version, platforms, out)
-	case catalog.KindBazel:
-		return buildBazel(ctx, c, name, p, version, platforms, out)
+	build, ok := builders[p.Kind]
+	if !ok {
+		return fmt.Errorf("%s: unknown kind %q", name, p.Kind)
 	}
-	return fmt.Errorf("%s: unknown kind %q", name, p.Kind)
+	if err := build(ctx, c, name, p, version, platforms, out); err != nil {
+		return err
+	}
+	// The host's tree, where one was built, answers the probe before
+	// any tree is handed on: what a kind produces is held to the
+	// plugin protocol, not to its toolchain's exit code.
+	return probeTree(ctx, p, platforms, out)
+}
+
+// A builder produces the plugin's trees for the platforms under out.
+type builder func(ctx context.Context, c *catalog.Catalog, name string, p *catalog.Plugin, version string, platforms []string, out string) error
+
+// builders are the kinds' builders; a test swaps one in.
+var builders = map[catalog.Kind]builder{
+	catalog.KindGo: func(ctx context.Context, _ *catalog.Catalog, _ string, p *catalog.Plugin, version string, platforms []string, out string) error {
+		return buildGo(ctx, p, version, platforms, out)
+	},
+	catalog.KindNode: func(ctx context.Context, _ *catalog.Catalog, _ string, p *catalog.Plugin, version string, platforms []string, out string) error {
+		return buildNode(ctx, p, version, platforms, out)
+	},
+	catalog.KindRelease: func(ctx context.Context, _ *catalog.Catalog, _ string, p *catalog.Plugin, version string, platforms []string, out string) error {
+		return buildRelease(ctx, p, version, platforms, out)
+	},
+	catalog.KindBazel: buildBazel,
 }
 
 // run executes a command in dir with the environment added to the

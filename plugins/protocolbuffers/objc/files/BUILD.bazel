@@ -1,0 +1,12 @@
+# protoc-gen-objc: protobuf's objc generator behind the plugin
+# protocol. protobuf ships the generator inside protoc and no plugin
+# executable of its own, so this target links one; the recipe copies
+# this directory to `plugins/` in protobuf's source tree and builds
+# it there.
+cc_binary(
+    name = "protoc-gen-objc",
+    srcs = ["objc.cc"],
+    deps = [
+        "//:protoc_lib",
+    ],
+)

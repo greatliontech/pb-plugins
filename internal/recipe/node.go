@@ -44,7 +44,16 @@ func buildNode(ctx context.Context, p *catalog.Plugin, version string, platforms
 	if err := run(ctx, tmp, nil, "bun", "install", "--no-progress", "--ignore-scripts"); err != nil {
 		return err
 	}
-	script, err := binScript(filepath.Join(tmp, "node_modules", filepath.FromSlash(p.Package)), p.Entrypoint)
+	pkgDir := filepath.Join(tmp, "node_modules", filepath.FromSlash(p.Package))
+	pkg, err := readPackage(pkgDir)
+	if err != nil {
+		return err
+	}
+	script, err := binScript(pkg, pkgDir, p.Entrypoint)
+	if err != nil {
+		return err
+	}
+	script, err = bundleEntry(script, pkg.Type)
 	if err != nil {
 		return err
 	}
@@ -65,20 +74,30 @@ func buildNode(ctx context.Context, p *catalog.Plugin, version string, platforms
 	return nil
 }
 
-// binScript is the path of the package's executable named in its
-// package.json `bin`: the map's entry of the name, or the one string
-// where `bin` is the package's sole executable.
-func binScript(pkgDir, name string) (string, error) {
+// npmPackage is what the catalog reads of a package.json: its bin
+// and its module type.
+type npmPackage struct {
+	Bin  json.RawMessage `json:"bin"`
+	Type string          `json:"type"`
+}
+
+// readPackage reads the package's package.json.
+func readPackage(pkgDir string) (*npmPackage, error) {
 	raw, err := os.ReadFile(filepath.Join(pkgDir, "package.json"))
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	var manifest struct {
-		Bin json.RawMessage `json:"bin"`
-	}
+	var manifest npmPackage
 	if err := json.Unmarshal(raw, &manifest); err != nil {
-		return "", fmt.Errorf("%s/package.json: %w", pkgDir, err)
+		return nil, fmt.Errorf("%s/package.json: %w", pkgDir, err)
 	}
+	return &manifest, nil
+}
+
+// binScript is the path of the package's executable named in its
+// `bin`: the map's entry of the name, or the one string where `bin`
+// is the package's sole executable.
+func binScript(manifest *npmPackage, pkgDir, name string) (string, error) {
 	var single string
 	if json.Unmarshal(manifest.Bin, &single) == nil && single != "" {
 		return filepath.Join(pkgDir, filepath.FromSlash(single)), nil
@@ -88,4 +107,24 @@ func binScript(pkgDir, name string) (string, error) {
 		return "", fmt.Errorf("%s/package.json: bin names no %s", pkgDir, name)
 	}
 	return filepath.Join(pkgDir, filepath.FromSlash(many[name])), nil
+}
+
+// bundleEntry is the entry bun's bundler follows: the bin script
+// itself where its extension names a script, else a copy beside it
+// under `.mjs` for a package of type module and `.cjs` otherwise — an
+// extensionless file, the usual shape of an npm bin, bun bundles as
+// an opaque file, the executable then running nothing.
+func bundleEntry(script, packageType string) (string, error) {
+	switch filepath.Ext(script) {
+	case ".js", ".cjs", ".mjs":
+		return script, nil
+	}
+	ext := ".cjs"
+	if packageType == "module" {
+		ext = ".mjs"
+	}
+	if err := copyFile(script, script+ext); err != nil {
+		return "", err
+	}
+	return script + ext, nil
 }

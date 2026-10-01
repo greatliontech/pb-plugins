@@ -53,12 +53,23 @@ type Plugin struct {
 	// Platforms are the platforms the plugin serves. A release recipe
 	// serves the keys of Assets instead.
 	Platforms []string `yaml:"platforms"`
+	// Silent says the plugin generates only for options the probe's
+	// file lacks, so a response holding no file is its right answer
+	// to the probe (recipe.Probe); every other plugin answers with a
+	// file.
+	Silent bool `yaml:"silent"`
+	// Frozen says the versions file is complete: the bump appends
+	// nothing, upstream's later versions carrying the executable no
+	// more.
+	Frozen bool `yaml:"frozen"`
 
 	// Module and Package name a go recipe's main package: the module
 	// the versions belong to and the package's path within it (`.`
 	// for the module's root).
 	Module  string `yaml:"module"`
 	Package string `yaml:"package"`
+	// Tags are a go recipe's build tags.
+	Tags []string `yaml:"tags"`
 
 	// Repository is the GitHub repository of a release or bazel
 	// recipe, `owner/name`; Tag spells its release tag from a
@@ -240,14 +251,14 @@ func (c *Catalog) Validate() error {
 			if p.Package == "" {
 				fail(name, "node: package required")
 			}
-			if p.Module != "" || p.Repository != "" || p.Tag != "" || p.Assets != nil || p.Member != "" || p.Archive != "" || p.Files != "" || p.Target != "" || p.Output != "" || p.Options != nil {
+			if p.Module != "" || p.Tags != nil || p.Repository != "" || p.Tag != "" || p.Assets != nil || p.Member != "" || p.Archive != "" || p.Files != "" || p.Target != "" || p.Output != "" || p.Options != nil {
 				fail(name, "node: a field of another kind set")
 			}
 		case KindRelease:
 			if !repoRE.MatchString(p.Repository) || !strings.Contains(p.Tag, "{version}") || len(p.Assets) == 0 || p.Member == "" {
 				fail(name, "release: repository, tag with {version}, assets and member required")
 			}
-			if p.Platforms != nil || p.Module != "" || p.Package != "" || p.Archive != "" || p.Files != "" || p.Target != "" || p.Output != "" || p.Options != nil {
+			if p.Platforms != nil || p.Module != "" || p.Package != "" || p.Tags != nil || p.Archive != "" || p.Files != "" || p.Target != "" || p.Output != "" || p.Options != nil {
 				fail(name, "release: a field of another kind set (platforms are the assets' keys)")
 			}
 			platforms = make([]string, 0, len(p.Assets))
@@ -259,7 +270,7 @@ func (c *Catalog) Validate() error {
 			if !repoRE.MatchString(p.Repository) || !strings.Contains(p.Tag, "{version}") || !strings.Contains(p.Archive, "{version}") || p.Target == "" || p.Output == "" {
 				fail(name, "bazel: repository, tag and archive with {version}, target and output required")
 			}
-			if p.Module != "" || p.Package != "" || p.Assets != nil || p.Member != "" {
+			if p.Module != "" || p.Package != "" || p.Tags != nil || p.Assets != nil || p.Member != "" {
 				fail(name, "bazel: a field of another kind set")
 			}
 			if p.Files != "" && (filepath.IsAbs(p.Files) || strings.Contains(p.Files, "..") || strings.Contains(p.Files, "/")) {
@@ -288,6 +299,9 @@ func (c *Catalog) Validate() error {
 				fail(name, "platform %q twice", pl)
 			}
 			seen[pl] = true
+		}
+		if p.Frozen && len(p.Versions) == 0 {
+			fail(name, "frozen with no version: a versions file is complete only holding one")
 		}
 		for i, v := range p.Versions {
 			if !IsVersion(v) {

@@ -37,9 +37,20 @@ func buildGo(ctx context.Context, p *catalog.Plugin, version string, platforms [
 		goos, goarch := catalog.SplitPlatform(pl)
 		outfile := filepath.Join(TreeDir(out, pl), p.Entrypoint)
 		penv := append(env, "GOOS="+goos, "GOARCH="+goarch, "CGO_ENABLED=0")
-		if err := run(ctx, tmp, penv, "go", "build", "-trimpath", "-ldflags=-s -w -buildid=", "-o", outfile, pkg); err != nil {
+		if err := run(ctx, tmp, penv, "go", goBuildArgs(p.Tags, outfile, pkg)...); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// goBuildArgs are the build's arguments: paths trimmed, symbols and
+// the build id stripped, the recipe's tags where it has any, the
+// package last.
+func goBuildArgs(tags []string, outfile, pkg string) []string {
+	args := []string{"build", "-trimpath", "-ldflags=-s -w -buildid=", "-o", outfile}
+	if len(tags) > 0 {
+		args = append(args, "-tags", strings.Join(tags, ","))
+	}
+	return append(args, pkg)
 }

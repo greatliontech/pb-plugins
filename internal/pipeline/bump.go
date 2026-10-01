@@ -24,11 +24,14 @@ type Discover func(ctx context.Context, p *catalog.Plugin) ([]string, error)
 // upstream has above its highest listed, ascending, and returns them
 // by plugin. Versions below the highest are never backfilled: what
 // the catalog skipped stays skipped, and a version enters by a hand
-// edit alone.
+// edit alone. A frozen plugin is passed over whole.
 func Bump(ctx context.Context, c *catalog.Catalog, discover Discover) (map[string][]string, error) {
 	added := map[string][]string{}
 	for _, name := range c.Names() {
 		p := c.Plugins[name]
+		if p.Frozen {
+			continue
+		}
 		found, err := discover(ctx, p)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", name, err)

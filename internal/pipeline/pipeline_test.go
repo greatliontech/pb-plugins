@@ -313,6 +313,14 @@ func TestBump(t *testing.T) {
 	if _, err := Bump(context.Background(), c, func(context.Context, *catalog.Plugin) ([]string, error) { return nil, errors.New("down") }); err == nil {
 		t.Error("an upstream down bumped")
 	}
+	// A frozen plugin is passed over: nothing appended, upstream not
+	// even asked.
+	c.Plugins["a/b"].Frozen = true
+	asked := false
+	frozen, err := Bump(context.Background(), c, func(context.Context, *catalog.Plugin) ([]string, error) { asked = true; return []string{"v9.0.0"}, nil })
+	if err != nil || len(frozen) != 0 || asked {
+		t.Errorf("a frozen plugin bumped: %v %v asked=%v", frozen, err, asked)
+	}
 }
 
 // A tag reads as a version through its template's prefix and suffix,

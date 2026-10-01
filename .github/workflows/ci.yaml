@@ -10,7 +10,11 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2025]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -20,9 +24,10 @@ jobs:
       - run: |
           unformatted=$(gofmt -l .)
           if [ -n "$unformatted" ]; then echo "$unformatted"; exit 1; fi
+        shell: bash
       - run: go mod tidy -diff
       - run: go vet ./...
       - run: go run ./cmd/catalog check
       - run: go test ./... -count=1
         env:
-          PBPLUGINS_LIVE: "1"
+          PBPLUGINS_LIVE: ${{ matrix.os == 'ubuntu-24.04' && '1' || '' }}

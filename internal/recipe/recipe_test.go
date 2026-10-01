@@ -9,7 +9,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -153,19 +155,29 @@ func TestExtractTarInto(t *testing.T) {
 func TestBinScript(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"bin":{"protoc-gen-es":"bin/protoc-gen-es","other":"x"}}`), 0o644)
-	if got, err := binScript(dir, "protoc-gen-es"); err != nil || got != filepath.Join(dir, "bin", "protoc-gen-es") {
+	manifest, err := readPackage(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := binScript(manifest, dir, "protoc-gen-es"); err != nil || got != filepath.Join(dir, "bin", "protoc-gen-es") {
 		t.Errorf("map: %q %v", got, err)
 	}
-	if _, err := binScript(dir, "missing"); err == nil {
+	if _, err := binScript(manifest, dir, "missing"); err == nil {
 		t.Error("a name the map lacks resolved")
 	}
-	os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"bin":"cli.js"}`), 0o644)
-	if got, err := binScript(dir, "whatever"); err != nil || got != filepath.Join(dir, "cli.js") {
-		t.Errorf("string: %q %v", got, err)
+	os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"bin":"cli.js","type":"module"}`), 0o644)
+	manifest, _ = readPackage(dir)
+	if got, err := binScript(manifest, dir, "whatever"); err != nil || got != filepath.Join(dir, "cli.js") || manifest.Type != "module" {
+		t.Errorf("string: %q %v %q", got, err, manifest.Type)
 	}
 	os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"name":"x"}`), 0o644)
-	if _, err := binScript(dir, "x"); err == nil {
+	manifest, _ = readPackage(dir)
+	if _, err := binScript(manifest, dir, "x"); err == nil {
 		t.Error("no bin resolved")
+	}
+	os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{`), 0o644)
+	if _, err := readPackage(dir); err == nil {
+		t.Error("a broken package.json read")
 	}
 }
 
@@ -229,5 +241,171 @@ func TestBazelArgs(t *testing.T) {
 	}
 	if got := strings.Join(bazelArgs(p, "linux"), " "); got != "--host_jvm_args=-Djava.net.preferIPv4Stack=true build -c opt //t" {
 		t.Errorf("linux: %s", got)
+	}
+}
+
+// bundleEntry hands bun a script whose extension it bundles: a bin
+// with one is handed as is, an extensionless one through a copy
+// beside it, `.cjs` by default and `.mjs` for a package of type
+// module, so its relative requires still resolve.
+func TestBundleEntry(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "cli"), []byte("#!/usr/bin/env node\nrequire('./lib')\n"), 0o755)
+	os.WriteFile(filepath.Join(dir, "cli.js"), []byte("x"), 0o755)
+	if got, err := bundleEntry(filepath.Join(dir, "cli.js"), "module"); err != nil || got != filepath.Join(dir, "cli.js") {
+		t.Errorf("a script with an extension: %q %v", got, err)
+	}
+	got, err := bundleEntry(filepath.Join(dir, "cli"), "")
+	if err != nil || got != filepath.Join(dir, "cli.cjs") {
+		t.Fatalf("extensionless: %q %v", got, err)
+	}
+	if b, _ := os.ReadFile(got); string(b) != "#!/usr/bin/env node\nrequire('./lib')\n" {
+		t.Errorf("the copy's bytes: %q", b)
+	}
+	if got, err := bundleEntry(filepath.Join(dir, "cli"), "module"); err != nil || got != filepath.Join(dir, "cli.mjs") {
+		t.Errorf("type module: %q %v", got, err)
+	}
+}
+
+// fakePlugin builds testdata/fakeplugin once per test binary: a
+// plugin answering as PROBE_MODE says.
+func fakePlugin(t *testing.T) string {
+	t.Helper()
+	exe := filepath.Join(t.TempDir(), "fakeplugin")
+	if runtime.GOOS == "windows" {
+		exe += ".exe"
+	}
+	cmd := exec.Command("go", "build", "-o", exe, "./testdata/fakeplugin")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("building the fake plugin: %v\n%s", err, out)
+	}
+	return exe
+}
+
+// modeScript wraps the fake plugin in a script setting its mode, the
+// executable then bare-named as a tree's entrypoint is.
+func modeScript(t *testing.T, dir, name, exe, mode string) string {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	var body string
+	if runtime.GOOS == "windows" {
+		p += ".cmd"
+		body = "@echo off\r\nset PROBE_MODE=" + mode + "\r\n\"" + exe + "\"\r\n"
+	} else {
+		body = "#!/bin/sh\nPROBE_MODE=" + mode + " exec " + exe + "\n"
+	}
+	if err := os.WriteFile(p, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// Probe holds a built executable to the plugin protocol: a response
+// with a file passes; nothing written, bytes no response parses
+// from, a non-zero exit, an error of the plugin's own, and an empty
+// response from a plugin not marked silent are refused; a silent
+// plugin's response holding no file but its features passes, and
+// nothing written is refused silent or not.
+func TestProbe(t *testing.T) {
+	exe := fakePlugin(t)
+	dir := t.TempDir()
+	ctx := context.Background()
+	for _, c := range []struct {
+		mode   string
+		silent bool
+		want   string
+	}{
+		{"file", false, ""}, {"file", true, ""}, {"error", false, "answered the probe with an error: go_package missing"}, {"error", true, "answered the probe with an error"},
+		{"features", false, "no file"}, {"features", true, ""}, {"empty", false, "wrote nothing"}, {"empty", true, "wrote nothing"},
+		{"garbage", false, "no plugin response"}, {"exit3", false, "exit status 3: boom"},
+	} {
+		err := Probe(ctx, modeScript(t, dir, c.mode, exe, c.mode), c.silent)
+		if (c.want == "") != (err == nil) || (err != nil && !strings.Contains(err.Error(), c.want)) {
+			t.Errorf("%s silent=%v: %v, want %q", c.mode, c.silent, err, c.want)
+		}
+	}
+	// The executable itself, bare-named as a tree's entrypoint, starts
+	// on every host (windows through a copy under .exe).
+	bare := filepath.Join(dir, "protoc-gen-bare")
+	if err := copyFile(exe, bare); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PROBE_MODE", "file")
+	if err := Probe(ctx, bare, false); err != nil {
+		t.Errorf("a bare-named executable: %v", err)
+	}
+}
+
+// probeTree probes the host's tree alone: a build of other platforms
+// is handed on unprobed, a build including the host's is held.
+func TestProbeTree(t *testing.T) {
+	exe := fakePlugin(t)
+	out := t.TempDir()
+	p := &catalog.Plugin{Entrypoint: "protoc-gen-x"}
+	other := "linux/arm64"
+	if Host() == other {
+		other = "linux/amd64"
+	}
+	if err := probeTree(context.Background(), p, []string{other}, out); err != nil {
+		t.Errorf("no host tree: %v", err)
+	}
+	if err := probeTree(context.Background(), p, []string{other, Host()}, out); err == nil {
+		t.Error("a missing host tree probed as fine")
+	}
+	t.Setenv("PROBE_MODE", "empty")
+	if err := copyFile(exe, filepath.Join(TreeDir(out, Host()), p.Entrypoint)); err != nil {
+		t.Fatal(err)
+	}
+	if err := probeTree(context.Background(), p, []string{Host()}, out); err == nil || !strings.Contains(err.Error(), "wrote nothing") {
+		t.Errorf("an empty answer: %v", err)
+	}
+	t.Setenv("PROBE_MODE", "file")
+	if err := probeTree(context.Background(), p, []string{Host()}, out); err != nil {
+		t.Errorf("a file answered: %v", err)
+	}
+}
+
+// Build holds what a kind built to the probe: a kind whose tree
+// answers nothing fails the build, one whose tree answers with a
+// file passes, and a build of no host platform is handed on as the
+// kind made it.
+func TestBuildProbes(t *testing.T) {
+	exe := fakePlugin(t)
+	c := &catalog.Catalog{Plugins: map[string]*catalog.Plugin{"a/b": {Kind: catalog.KindGo, Entrypoint: "protoc-gen-x", Platforms: catalog.Platforms}}}
+	saved := builders[catalog.KindGo]
+	defer func() { builders[catalog.KindGo] = saved }()
+	builders[catalog.KindGo] = func(_ context.Context, _ *catalog.Catalog, _ string, p *catalog.Plugin, _ string, platforms []string, out string) error {
+		for _, pl := range platforms {
+			if err := copyFile(exe, filepath.Join(TreeDir(out, pl), p.Entrypoint)); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	other := "linux/arm64"
+	if Host() == other {
+		other = "linux/amd64"
+	}
+	t.Setenv("PROBE_MODE", "empty")
+	if err := Build(context.Background(), c, "a/b", "v1.0.0", []string{Host()}, t.TempDir()); err == nil || !strings.Contains(err.Error(), "wrote nothing") {
+		t.Errorf("a tree answering nothing built: %v", err)
+	}
+	if err := Build(context.Background(), c, "a/b", "v1.0.0", []string{other}, t.TempDir()); err != nil {
+		t.Errorf("no host tree, yet refused: %v", err)
+	}
+	t.Setenv("PROBE_MODE", "file")
+	if err := Build(context.Background(), c, "a/b", "v1.0.0", []string{Host(), other}, t.TempDir()); err != nil {
+		t.Errorf("a tree answering a file refused: %v", err)
+	}
+}
+
+// A go recipe's tags reach the build as one -tags argument, and none
+// where it has none.
+func TestGoBuildArgs(t *testing.T) {
+	if got := strings.Join(goBuildArgs(nil, "o", "m/p"), " "); got != "build -trimpath -ldflags=-s -w -buildid= -o o m/p" {
+		t.Errorf("no tags: %q", got)
+	}
+	if got := strings.Join(goBuildArgs([]string{"a", "b"}, "o", "m/p"), " "); got != "build -trimpath -ldflags=-s -w -buildid= -o o -tags a,b m/p" {
+		t.Errorf("tags: %q", got)
 	}
 }

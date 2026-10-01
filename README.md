@@ -50,6 +50,19 @@ the `release` kind takes upstream's.
 | `release` | the executable an upstream GitHub release ships prebuilt, one asset per platform | the assets upstream ships | the repository's releases |
 | `bazel` | a C++ target built by bazel on a runner of the platform itself | linux and darwin on both architectures, windows/amd64 (no bazel C++ toolchain is established for windows/arm64) | the repository's releases |
 
+Every kind's trees are held to the plugin protocol before they are
+handed on: the tree of the platform the build runs on answers a
+probe — one proto3 file with a message pair and a service, the
+request a generator acts on — with a response holding a file; a tree
+that writes nothing, or no response, or exits non-zero, or answers
+with an error of its own, fails the build. A plugin generating only
+for options the probe's file lacks is marked `silent` in the catalog:
+its response holds no file, and bytes all the same (its features, as
+every generator's framework writes them). A go recipe's `tags` are
+its build tags; a plugin marked `frozen` takes no further version
+from the bump, its versions file complete (a generator that left its
+module).
+
 The six platforms are pb's: `linux/amd64`, `linux/arm64`,
 `darwin/amd64`, `darwin/arm64`, `windows/amd64`, `windows/arm64`.
 Every kind lays out one file per platform, the entrypoint at the
