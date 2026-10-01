@@ -25,6 +25,22 @@ executables the recipes produce.
 - `cmd/catalog` — the tool the workflows run: `check`, `plan`,
   `tree`, `publish`, `bump`.
 
+## Membership
+
+The catalog mirrors buf's registry by owner: every plugin under
+`protocolbuffers`, `grpc`, `connectrpc`, `bufbuild`, `grpc-ecosystem`
+and `pluginrpc`, and of the rest `apple/swift`,
+`community/scalapb-scala`, `community/scalapb-zio-grpc`,
+`community/planetscale-vtprotobuf` and the community generators the
+`go` and `node` kinds build. A plugin enters when its kind exists:
+the four kinds below first, then kinds for the rest — the `release`
+kind reading Maven Central, `rust`, `swift`, `dart`, `jvm` and
+`python`. A plugin that is a program for a runtime rather than one
+executable (a jar, a Python package) ships the runtime in its image
+behind a native launcher as the entrypoint, never compiled to a
+native executable here; where upstream itself ships one (ScalaPB),
+the `release` kind takes upstream's.
+
 ## Recipe kinds
 
 | kind | produces | platforms | discovery |
