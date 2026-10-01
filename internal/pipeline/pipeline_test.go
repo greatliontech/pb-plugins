@@ -126,6 +126,13 @@ func (f fakeRegistry) Digest(_ context.Context, ref string) (string, error) {
 
 // fakeTool writes a shell script that records its arguments and
 // prints the report given.
+// logOf is a fake tool's log as the shell wrote it, windows' line
+// endings read as LF.
+func logOf(path string) []byte {
+	b, _ := os.ReadFile(path)
+	return []byte(strings.ReplaceAll(string(b), "\r\n", "\n"))
+}
+
 func fakeTool(t *testing.T, dir, name, report string) (path, log string) {
 	t.Helper()
 	log = filepath.Join(dir, name+".log")
@@ -135,7 +142,7 @@ func fakeTool(t *testing.T, dir, name, report string) (path, log string) {
 		// A batch file: the arguments as one line to the log, the
 		// report (one line, its own line break) to standard output.
 		path += ".cmd"
-		script = "@echo off\r\necho %* >> \"" + log + "\"\r\necho " + strings.TrimSuffix(report, "\\n") + "\r\n"
+		script = "@echo off\r\necho %*>>\"" + log + "\"\r\necho " + strings.TrimSuffix(report, "\\n") + "\r\n"
 	}
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
@@ -172,7 +179,7 @@ func TestPublish(t *testing.T) {
 	if err := p.Publish(context.Background(), "protocolbuffers/js", "v4.0.3"); err != nil {
 		t.Fatal(err)
 	}
-	args, _ := os.ReadFile(pbLog)
+	args := logOf(pbLog)
 	want := []string{
 		"plugin build " + ref + " --entrypoint /protoc-gen-js",
 		"--platform linux/amd64=" + filepath.Join(trees, "linux-amd64") + " --base linux/amd64=gcr.io/distroless/cc-debian13@sha256:linuxamd640000",
@@ -188,7 +195,7 @@ func TestPublish(t *testing.T) {
 	if strings.Contains(string(args), "--base darwin") || strings.Contains(string(args), "--base windows") {
 		t.Errorf("a base for a non-Linux platform: %q", args)
 	}
-	sig, _ := os.ReadFile(cosignLog)
+	sig := logOf(cosignLog)
 	repo, _, _ := strings.Cut(ref, ":v")
 	if string(sig) != "sign --yes --recursive "+repo+"@sha256:1111\n" {
 		t.Errorf("cosign args %q", sig)
@@ -237,7 +244,7 @@ func TestPublish(t *testing.T) {
 	if _, err := os.Stat(pbLog); err == nil {
 		t.Error("pb ran over a published tag")
 	}
-	sig, _ = os.ReadFile(cosignLog)
+	sig = logOf(cosignLog)
 	if string(sig) != "sign --yes --recursive "+repo+"@sha256:3333\n" || !strings.Contains(out.String(), "@sha256:3333 published already") {
 		t.Errorf("published tag: cosign %q, report %q", sig, out.String())
 	}
@@ -267,7 +274,7 @@ func TestPublish(t *testing.T) {
 	if err := p.Publish(context.Background(), "protocolbuffers/go", "v1.36.12"); err != nil {
 		t.Fatal(err)
 	}
-	args, _ = os.ReadFile(pbLog)
+	args = logOf(pbLog)
 	if strings.Contains(string(args), "--base") {
 		t.Errorf("a base for the go kind: %q", args)
 	}
