@@ -41,16 +41,20 @@ func TestPlan(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A cross job of a pinned kind carries the catalog's toolchain,
-	// one of another kind none.
+	// one of another kind none; a kind whose pins the build fetches
+	// for itself (python) carries none though the catalog pins them.
 	crossKinds := map[string]bool{}
 	for _, cr := range plan.Cross.Include {
 		crossKinds[cr.Kind] = true
-		if cr.Toolchain != c.Toolchains[cr.Kind] {
-			t.Errorf("%s: toolchain %q, want the catalog's %q", cr.Tree, cr.Toolchain, c.Toolchains[cr.Kind])
+		if cr.Toolchain != c.Installed(catalog.Kind(cr.Kind)) {
+			t.Errorf("%s: toolchain %q, want the catalog's %q", cr.Tree, cr.Toolchain, c.Installed(catalog.Kind(cr.Kind)))
+		}
+		if cr.Kind == "python" && cr.Toolchain != "" {
+			t.Errorf("%s: a python job carries a toolchain for the pipeline to install: %q", cr.Tree, cr.Toolchain)
 		}
 	}
-	if !crossKinds["jvm"] || !crossKinds["go"] {
-		t.Errorf("the plan's cross kinds: %v", crossKinds)
+	if !crossKinds["jvm"] || !crossKinds["go"] || !crossKinds["python"] || c.Toolchains["python"] == "" {
+		t.Errorf("the plan's cross kinds: %v, python pinned %q", crossKinds, c.Toolchains["python"])
 	}
 	// A rust or swift tree carries the catalog's pinned toolchain; a
 	// bazel one none.
@@ -537,6 +541,28 @@ func TestUpstreamJvm(t *testing.T) {
 	vs, err := Upstream(context.Background(), &catalog.Plugin{Kind: catalog.KindJvm, Maven: "io.grpc:protoc-gen-grpc-kotlin"})
 	if err != nil || strings.Join(vs, " ") != "v1.4.3 v1.5.0" {
 		t.Fatalf("versions from Maven: %v %v", vs, err)
+	}
+}
+
+// A python recipe discovers its versions on PyPI: the final
+// releases serving a file, a pre-release, a development one, one
+// with no file and one with every file yanked passed over.
+func TestUpstreamPython(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/protoc-gen-py/json" {
+			http.NotFound(w, r)
+			return
+		}
+		fmt.Fprint(w, `{"info":{"version":"0.6.0"},"releases":{"0.3.0":[],"0.4.0":[{"yanked":true}],"0.5.0":[{"yanked":true},{}],"0.6.0":[{}],"0.7.0rc1":[{}],"0.7.0.dev1":[{}]}}`)
+	}))
+	defer srv.Close()
+	saved := endpoints.PyPI
+	endpoints.PyPI = srv.URL
+	defer func() { endpoints.PyPI = saved }()
+	vs, err := Upstream(context.Background(), &catalog.Plugin{Kind: catalog.KindPython, Pypi: "protoc-gen-py"})
+	sort.Strings(vs)
+	if err != nil || strings.Join(vs, " ") != "v0.5.0 v0.6.0" {
+		t.Fatalf("versions from PyPI: %v %v", vs, err)
 	}
 }
 

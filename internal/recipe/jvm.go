@@ -54,6 +54,9 @@ func buildJvm(ctx context.Context, c *catalog.Catalog, name string, p *catalog.P
 		if err := jlink(ctx, jmods, p.JvmModules(), filepath.Join(tree, "jre")); err != nil {
 			return err
 		}
+		if err := dropLinks(filepath.Join(tree, "jre")); err != nil {
+			return err
+		}
 		launcher := filepath.Join(tree, "jre", "bin", "java")
 		if strings.HasPrefix(pl, "windows/") {
 			// The windows launcher under its bare name, as every
@@ -138,23 +141,6 @@ func JDKAsset(ctx context.Context, release, platform string) (link, checksum str
 	return doc.Binaries[0].Package.Link, strings.ToLower(doc.Binaries[0].Package.Checksum), nil
 }
 
-// jdkCache is where a release's JDKs are kept extracted per platform
-// once fetched, under the user's cache directory (the temporary
-// directory where the host names none): a build links every
-// platform's runtime and a live test every plugin's, and a JDK is
-// fetched once for all of them; a test points it elsewhere. A JDK
-// lies under the checksum Adoptium publishes for it, extracted
-// beside its place and moved in whole, so a directory in place is a
-// complete extraction of those bytes and is never removed; the
-// user's own directory, which another user of the host cannot plant.
-var jdkCache = func() string {
-	dir, err := os.UserCacheDir()
-	if err != nil {
-		dir = os.TempDir()
-	}
-	return filepath.Join(dir, "pb-plugins", "jdk")
-}()
-
 // fetchJmods returns the jmods directory of the Temurin JDK of the
 // release for the platform, fetched from Adoptium at the checksum it
 // publishes and kept under the cache, where a JDK in place under
@@ -164,39 +150,11 @@ func fetchJmods(ctx context.Context, release, platform string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	dir := filepath.Join(jdkCache, release, strings.ReplaceAll(platform, "/", "-"), checksum)
-	if jmods, err := findDir(dir, "jmods"); err == nil {
-		return jmods, nil
-	}
-	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
-		return "", err
-	}
-	// Extracted beside its place and moved in whole; two builds
-	// missing the cache together both extract, the second's move
-	// finding the first's in place and keeping it. An extraction a
-	// killed build left beside is swept on a later miss once it is
-	// older than any extraction runs, so one in progress beside is
-	// left alone.
-	if stale, _ := filepath.Glob(filepath.Join(filepath.Dir(dir), ".extract-*")); len(stale) > 0 {
-		for _, s := range stale {
-			if st, err := os.Stat(s); err == nil && time.Since(st.ModTime()) > staleExtraction {
-				os.RemoveAll(s)
-			}
-		}
-	}
-	tmp, err := os.MkdirTemp(filepath.Dir(dir), ".extract-")
+	dir, err := cached("jdk", release, platform, checksum, func(dir string) error {
+		return fetchJDK(ctx, link, checksum, dir)
+	})
 	if err != nil {
 		return "", err
-	}
-	if err := fetchJDK(ctx, link, checksum, tmp); err != nil {
-		os.RemoveAll(tmp)
-		return "", err
-	}
-	if err := os.Rename(tmp, dir); err != nil {
-		os.RemoveAll(tmp)
-		if _, statErr := os.Stat(dir); statErr != nil {
-			return "", err
-		}
 	}
 	return findDir(dir, "jmods")
 }
@@ -263,6 +221,14 @@ func findDir(root, name string) (string, error) {
 // with nothing stripped).
 func untarInto(f io.Reader, dir string) error { return untar(f, 0, dir) }
 
+// untarSelect extracts the entries keep admits, by their path within
+// the archive, into dir, no link among them created: a tree whose
+// links are dropped anyway, and whose unneeded parts collide by
+// case on a host that folds it.
+func untarSelect(f io.Reader, dir string, keep func(name string) bool) error {
+	return extractTar(f, 0, dir, keep, false)
+}
+
 // untar extracts a gzip-compressed tar into dir, each entry's
 // leading path components stripped by the count (an entry with no
 // more passed over): regular files and directories, the modes kept,
@@ -270,6 +236,12 @@ func untarInto(f io.Reader, dir string) error { return untar(f, 0, dir) }
 // and refused where it escapes, a hard link passed over, a path
 // escaping the directory refused.
 func untar(f io.Reader, strip int, dir string) error {
+	return extractTar(f, strip, dir, nil, true)
+}
+
+// extractTar is untar with a selection (nil admitting every entry)
+// and whether links are created.
+func extractTar(f io.Reader, strip int, dir string, keep func(name string) bool, links bool) error {
 	gz, err := gzip.NewReader(f)
 	if err != nil {
 		return err
@@ -289,7 +261,10 @@ func untar(f io.Reader, strip int, dir string) error {
 			continue
 		}
 		rel := path.Join(parts[strip:]...)
-		if rel == "." {
+		if rel == "." || (keep != nil && !keep(rel)) {
+			continue
+		}
+		if h.Typeflag == tar.TypeSymlink && !links {
 			continue
 		}
 		dst, err := within(dir, rel)

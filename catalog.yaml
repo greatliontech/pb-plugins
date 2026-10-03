@@ -8,9 +8,9 @@
 # root, which `pb plugin build` packages as the image's
 # `/<entrypoint>`; a runtime program ships its runtime beside it (a
 # jvm recipe's `jre/`, a runtime node recipe's `node` beside the
-# package under `app/`). Where a kind's Linux executables link
-# the platform's C library (node, release, bazel, dart and jvm), the
-# Linux trees
+# package under `app/`, a python recipe's `python/` beside it). Where
+# a kind's Linux executables link the platform's C library (node,
+# release, bazel, dart, jvm and python), the Linux trees
 # are layered over `base`, pinned by its index digest and resolved to
 # the platform's own image at publish.
 registry: ghcr.io/greatliontech/pb-plugins
@@ -22,6 +22,11 @@ toolchains:
   dart: 3.13.5
   jvm: 21.0.12.1+1
   node: 24.21.0
+  # The python kind's interpreter (CPython's version and
+  # python-build-standalone's release) and installer, which a build
+  # fetches for itself at their published checksums.
+  python: 3.13.16+20261001
+  uv: 0.12.22
 # The sha256 of the static Linux SDK bundle swift.org publishes for
 # the Swift release pinned above, which the runner installs beside
 # the toolchain; `catalog sdk swift` reads swift.org's and holds the
@@ -298,6 +303,20 @@ plugins:
     package: protoc-gen-php-grpc
     entrypoint: protoc-gen-php-grpc
     platforms: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64, windows/arm64]
+  # Connect's first Python generator was a Go program, shipped to
+  # PyPI inside a wheel as an executable; its module lives in the
+  # repository's protoc-gen-connect-python directory. Deprecated
+  # upstream for connectrpc/py, frozen at its last.
+  connectrpc/python:
+    source: https://github.com/connectrpc/connect-python
+    kind: go
+    repository: connectrpc/connect-python
+    tag: v{version}
+    dir: protoc-gen-connect-python
+    package: .
+    entrypoint: protoc-gen-connectrpc
+    platforms: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64, windows/arm64]
+    frozen: true
 
   # kind rust: a crate's executable installed with cargo on a runner
   # of the platform itself, with the toolchain pinned above, locked
@@ -807,3 +826,29 @@ plugins:
     script: protoc-gen-ts_proto
     entrypoint: protoc-gen-ts_proto
     platforms: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64]
+
+  # kind python: a PyPI package's console script run by the
+  # standalone CPython build bundled for every platform, from
+  # python-build-standalone at the release pinned above and the
+  # checksums it publishes; the package installed per platform by uv,
+  # which picks that platform's wheels, under `app/`; the image's
+  # process `/python/bin/python3 -I app/<entrypoint>.py`. CPython links
+  # the C library: base applies.
+  bufbuild/py:
+    source: https://github.com/bufbuild/protobuf-py
+    kind: python
+    pypi: protoc-gen-py
+    entrypoint: protoc-gen-py
+    platforms: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64, windows/arm64]
+  bufbuild/grpc-py:
+    source: https://github.com/bufbuild/protoc-gen-grpc-py
+    kind: python
+    pypi: protoc-gen-grpc-py
+    entrypoint: protoc-gen-grpc-py
+    platforms: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64, windows/arm64]
+  connectrpc/py:
+    source: https://github.com/connectrpc/connect-py
+    kind: python
+    pypi: protoc-gen-connectrpc
+    entrypoint: protoc-gen-connectrpc
+    platforms: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64, windows/arm64]

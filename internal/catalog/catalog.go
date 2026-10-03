@@ -52,6 +52,10 @@ const (
 	// for every platform from the pinned JDK's modules, the image's
 	// entrypoint `jre/bin/java -jar <jar>`.
 	KindJvm Kind = "jvm"
+	// KindPython bundles a PyPI package's console script with the
+	// standalone CPython build for every platform, the image's
+	// entrypoint `python/bin/python3 -I app/<entrypoint>.py`.
+	KindPython Kind = "python"
 )
 
 // Platforms is every platform a recipe may serve, in the spelling
@@ -152,6 +156,9 @@ type Plugin struct {
 	// neither takes the repository's releases.
 	Maven string `yaml:"maven"`
 	Npm   string `yaml:"npm"`
+	// Pypi names a python recipe's package on PyPI, whose releases
+	// are its versions and whose console scripts name the entrypoint.
+	Pypi string `yaml:"pypi"`
 	// Checksum names the digest upstream publishes beside each asset
 	// (`sha256`: the asset's URL with `.sha256` appended, the hex
 	// digest first on its line), verified before the asset is read.
@@ -302,12 +309,16 @@ var owned = map[Kind]map[string]bool{
 	KindSwift:   fields("platforms", "repository", "tag", "product"),
 	KindDart:    fields("platforms", "repository", "tag", "dir", "main"),
 	KindJvm:     fields("platforms", "maven", "classifier", "extension", "checksum", "modules"),
+	KindPython:  fields("platforms", "pypi"),
 }
 
 // JvmModules are the JDK modules a jvm recipe's runtime is linked
 // from where it names none: what the generators on Maven need, as
 // buf links them.
 var JvmModules = []string{"java.base", "java.compiler", "java.instrument", "java.logging", "java.management", "jdk.unsupported"}
+
+// pypiRE is a PyPI package name as PEP 508 spells it.
+var pypiRE = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$`)
 
 // pinned are the kinds whose toolchain the pipeline installs from
 // the catalog's `toolchains`, each required where a recipe of the
@@ -318,16 +329,26 @@ var pinned = map[Kind]bool{KindRust: true, KindSwift: true, KindDart: true, Kind
 // recipe running under it; a recipe compiled by bun needs none.
 var nodePinnable = map[Kind]bool{KindNode: true}
 
-// toolchainREs are the shapes a kind's pin takes: a release number
-// for rust, swift and dart; Temurin's release name for the jvm
-// kind's JDK (`21.0.12.1+1`, the build number after the plus), the
-// name Adoptium's API serves the release's assets under.
-var toolchainREs = map[Kind]*regexp.Regexp{
-	KindRust:  toolchainRE,
-	KindSwift: toolchainRE,
-	KindDart:  toolchainRE,
-	KindNode:  toolchainRE,
-	KindJvm:   regexp.MustCompile(`^[0-9]+(\.[0-9]+)*\+[0-9]+$`),
+// fetched are the pins a build fetches for itself rather than the
+// pipeline installs: the python kind's interpreter (`python`,
+// python-build-standalone's release) and its installer (`uv`), both
+// required where a python recipe exists.
+var fetched = map[string]bool{"python": true, "uv": true}
+
+// toolchainREs are the shapes a pin takes, by its name: a release
+// number for rust, swift, dart, node and uv; Temurin's release name
+// for the jvm kind's JDK (`21.0.12.1+1`, the build number after the
+// plus), the name Adoptium's API serves the release's assets under;
+// CPython's version and python-build-standalone's release tag
+// (`3.13.16+20261001`) for python, which names the release's assets.
+var toolchainREs = map[string]*regexp.Regexp{
+	string(KindRust):  toolchainRE,
+	string(KindSwift): toolchainRE,
+	string(KindDart):  toolchainRE,
+	string(KindNode):  toolchainRE,
+	string(KindJvm):   regexp.MustCompile(`^[0-9]+(\.[0-9]+)*\+[0-9]+$`),
+	"python":          regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+\+[0-9]{8}$`),
+	"uv":              toolchainRE,
 }
 
 // sdkPinned are the kinds whose linux SDK the pipeline installs from
@@ -429,10 +450,10 @@ func (c *Catalog) Validate() error {
 		errs = append(errs, errors.New("no plugins"))
 	}
 	for kind, v := range c.Toolchains {
-		if !pinned[Kind(kind)] && !nodePinnable[Kind(kind)] {
+		if !pinned[Kind(kind)] && !nodePinnable[Kind(kind)] && !fetched[kind] {
 			errs = append(errs, fmt.Errorf("toolchains: %q names no kind the pipeline pins a toolchain for", kind))
 		}
-		if re := toolchainREs[Kind(kind)]; re != nil && !re.MatchString(v) {
+		if re := toolchainREs[kind]; re != nil && !re.MatchString(v) {
 			errs = append(errs, fmt.Errorf("toolchains: %s %q is no release number", kind, v))
 		}
 	}
@@ -457,6 +478,13 @@ func (c *Catalog) Validate() error {
 		if p.Kind == KindNode && p.Runtime && c.Toolchains[string(KindNode)] == "" {
 			errs = append(errs, errors.New("toolchains: a node recipe running under node's runtime needs the node toolchain pinned"))
 			break
+		}
+	}
+	if kinds[KindPython] {
+		for _, pin := range []string{"python", "uv"} {
+			if c.Toolchains[pin] == "" {
+				errs = append(errs, fmt.Errorf("toolchains: a python recipe needs %s pinned", pin))
+			}
 		}
 	}
 	for kind := range sdkPinned {
@@ -605,6 +633,10 @@ func (c *Catalog) Validate() error {
 					fail(name, "jvm: module %q is no module name", m)
 				}
 			}
+		case KindPython:
+			if !pypiRE.MatchString(p.Pypi) {
+				fail(name, "python: pypi %q is no package name", p.Pypi)
+			}
 		case KindDart:
 			if !repoRE.MatchString(p.Repository) || !strings.Contains(p.Tag, "{version}") {
 				fail(name, "dart: repository owner/name and tag with {version} required")
@@ -740,6 +772,11 @@ func (p *Plugin) Argv() []string {
 	if p.Kind == KindNode && p.Runtime {
 		return []string{"/node", "app/node_modules/" + p.Package + "/" + p.Script}
 	}
+	if p.Kind == KindPython {
+		// Isolated: the interpreter reads no PYTHON* variable and no
+		// user site, the launcher adding the package's files itself.
+		return []string{"/python/bin/python3", "-I", "app/" + p.Entrypoint + ".py"}
+	}
 	if p.Kind == KindJvm {
 		// Processes are started by fork and exec, not through the
 		// runtime's spawn helper: the build marks one set of files
@@ -763,6 +800,16 @@ func (p *Plugin) JarFile(version string) string {
 		ext = "jar"
 	}
 	return name + "." + ext
+}
+
+// Installed is the toolchain the pipeline installs on a runner
+// before a recipe of the kind builds: the kind's pin, none where
+// the build fetches its pins for itself.
+func (c *Catalog) Installed(kind Kind) string {
+	if fetched[string(kind)] {
+		return ""
+	}
+	return c.Toolchains[string(kind)]
 }
 
 // JvmModules are the modules the recipe's runtime is linked from.

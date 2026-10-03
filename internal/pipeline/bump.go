@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -100,9 +101,45 @@ func Upstream(ctx context.Context, p *catalog.Plugin) ([]string, error) {
 		return cratesVersions(ctx, p.Crate)
 	case catalog.KindJvm:
 		return mavenVersions(ctx, p.Maven)
+	case catalog.KindPython:
+		return pypiVersions(ctx, p.Pypi)
 	}
 	return nil, fmt.Errorf("unknown kind %q", p.Kind)
 }
+
+// pypiVersions lists the package's final releases from PyPI, the
+// pre-releases, the development ones and the ones serving no file
+// left out, each as the tag the catalog spells it (`v` before the
+// number).
+func pypiVersions(ctx context.Context, pkg string) ([]string, error) {
+	body, err := web.Get(ctx, endpoints.PyPI+"/"+pkg+"/json", nil)
+	if err != nil {
+		return nil, err
+	}
+	var doc struct {
+		Releases map[string][]struct {
+			Yanked bool `json:"yanked"`
+		} `json:"releases"`
+	}
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return nil, err
+	}
+	var vs []string
+	for v, files := range doc.Releases {
+		// A release with no file, or every file yanked, serves nothing.
+		served := false
+		for _, f := range files {
+			served = served || !f.Yanked
+		}
+		if finalReleaseRE.MatchString(v) && served {
+			vs = append(vs, "v"+v)
+		}
+	}
+	return vs, nil
+}
+
+// finalReleaseRE is a PEP 440 final release: numbers and dots alone.
+var finalReleaseRE = regexp.MustCompile(`^[0-9]+(\.[0-9]+)*$`)
 
 func goVersions(ctx context.Context, mod string) ([]string, error) {
 	escaped, err := module.EscapePath(mod)

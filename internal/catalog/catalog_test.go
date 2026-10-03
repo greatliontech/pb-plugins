@@ -208,7 +208,7 @@ func TestExpandAndPlatforms(t *testing.T) {
 // The bazel, rust, swift and dart kinds build on the platform itself; the
 // others cross-build from one host.
 func TestNative(t *testing.T) {
-	for k, want := range map[Kind]bool{KindGo: false, KindNode: false, KindRelease: false, KindBazel: true, KindRust: true, KindSwift: true, KindDart: true, KindJvm: false} {
+	for k, want := range map[Kind]bool{KindGo: false, KindNode: false, KindRelease: false, KindBazel: true, KindRust: true, KindSwift: true, KindDart: true, KindJvm: false, KindPython: false} {
 		if got := k.Native(); got != want {
 			t.Errorf("%s native: %v, want %v", k, got, want)
 		}
@@ -235,6 +235,12 @@ func TestArgvAndJar(t *testing.T) {
 	j := &Plugin{Kind: KindJvm, Entrypoint: "protoc-gen-scala", Maven: "com.thesamet.scalapb:protoc-gen-scala", Classifier: "unix", Extension: "sh"}
 	if got := strings.Join(j.Argv(), " "); got != "/jre/bin/java -Djdk.lang.Process.launchMechanism=FORK -jar protoc-gen-scala.jar" {
 		t.Errorf("a jvm recipe's process: %q", got)
+	}
+	// A python recipe's process: the interpreter isolated over the
+	// launcher under app/, named by the entrypoint.
+	py := &Plugin{Kind: KindPython, Entrypoint: "protoc-gen-py", Pypi: "protoc-gen-py"}
+	if got := strings.Join(py.Argv(), " "); got != "/python/bin/python3 -I app/protoc-gen-py.py" {
+		t.Errorf("a python recipe's process: %q", got)
 	}
 	if got := j.JarFile("v0.11.20"); got != "protoc-gen-scala-0.11.20-unix.sh" {
 		t.Errorf("the jar's name: %q", got)
@@ -283,6 +289,28 @@ func TestToolchainsPinned(t *testing.T) {
 	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "a node recipe running under node's runtime needs the node toolchain pinned") {
 		t.Errorf("a runtime node recipe without the pin: %v", err)
 	}
+	// A python recipe needs its interpreter and its installer pinned,
+	// which the build fetches; its package a PyPI name.
+	python := "  g/h:\n    source: s\n    kind: python\n    pypi: protoc-gen-x\n    entrypoint: e\n    platforms: [linux/amd64]\n"
+	for _, tc := range []struct{ name, toolchains, want string }{
+		{"python unpinned", "", "a python recipe needs python pinned"},
+		{"uv unpinned", "  python: 3.13.16+20261001\n", "a python recipe needs uv pinned"},
+		{"a python pin without the release", "  python: 3.13.16\n  uv: 0.12.22\n", "python \"3.13.16\" is no release number"},
+		{"both pinned", "  python: 3.13.16+20261001\n  uv: 0.12.22\n", ""},
+	} {
+		write(t, dir, "registry: r.example/p\nbase: r.example/base@sha256:ab\ntoolchains:\n  swift: 6.4.0\n"+tc.toolchains+sdk+"plugins:\n"+swift+python, map[string]string{"a/b": "v1.0.0\n", "g/h": "v1.0.0\n"})
+		_, err := Load(dir)
+		switch {
+		case tc.want == "" && err != nil:
+			t.Errorf("%s: refused: %v", tc.name, err)
+		case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)):
+			t.Errorf("%s: want %q, got %v", tc.name, tc.want, err)
+		}
+	}
+	write(t, dir, "registry: r.example/p\nbase: r.example/base@sha256:ab\ntoolchains:\n  swift: 6.4.0\n  python: 3.13.16+20261001\n  uv: 0.12.22\n"+sdk+"plugins:\n"+swift+strings.Replace(python, "protoc-gen-x", "-x", 1), map[string]string{"a/b": "v1.0.0\n", "g/h": "v1.0.0\n"})
+	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), `pypi "-x" is no package name`) {
+		t.Errorf("a pypi name of another shape: %v", err)
+	}
 	compiled := "  e/f:\n    source: s\n    kind: node\n    package: p\n    entrypoint: e\n    platforms: [linux/amd64]\n"
 	write(t, dir, "registry: r.example/p\nbase: r.example/base@sha256:ab\ntoolchains:\n  swift: 6.4.0\n"+sdk+"plugins:\n"+swift+compiled, map[string]string{"a/b": "v1.0.0\n", "e/f": "v1.0.0\n"})
 	if _, err := Load(dir); err != nil {
@@ -315,7 +343,7 @@ func TestToolchainsPinned(t *testing.T) {
 // base; the dart kind's links the C library and takes it, as every
 // other kind's may.
 func TestNeedsBase(t *testing.T) {
-	for k, want := range map[Kind]bool{KindGo: false, KindRust: false, KindSwift: false, KindNode: true, KindRelease: true, KindBazel: true, KindDart: true, KindJvm: true} {
+	for k, want := range map[Kind]bool{KindGo: false, KindRust: false, KindSwift: false, KindNode: true, KindRelease: true, KindBazel: true, KindDart: true, KindJvm: true, KindPython: true} {
 		if got := k.NeedsBase(); got != want {
 			t.Errorf("%s needs a base: %v, want %v", k, got, want)
 		}

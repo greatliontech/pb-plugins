@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/greatliontech/pb-plugins/internal/catalog"
 	"github.com/greatliontech/pb-plugins/internal/endpoints"
@@ -97,11 +98,12 @@ var builders = map[catalog.Kind]builder{
 	catalog.KindRelease: func(ctx context.Context, _ *catalog.Catalog, _ string, p *catalog.Plugin, version string, platforms []string, out string) error {
 		return buildRelease(ctx, p, version, platforms, out)
 	},
-	catalog.KindBazel: buildBazel,
-	catalog.KindRust:  buildRust,
-	catalog.KindSwift: buildSwift,
-	catalog.KindDart:  buildDart,
-	catalog.KindJvm:   buildJvm,
+	catalog.KindBazel:  buildBazel,
+	catalog.KindRust:   buildRust,
+	catalog.KindSwift:  buildSwift,
+	catalog.KindDart:   buildDart,
+	catalog.KindJvm:    buildJvm,
+	catalog.KindPython: buildPython,
 }
 
 // command is a command in dir with the environment added to the
@@ -124,6 +126,31 @@ func run(ctx context.Context, dir string, env []string, name string, args ...str
 		return fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), err)
 	}
 	return nil
+}
+
+// runIn is run under the environment given whole, not the process's.
+func runIn(ctx context.Context, dir string, environ []string, name string, args ...string) error {
+	cmd := command(ctx, dir, nil, name, args...)
+	cmd.Env = environ
+	cmd.Stdout = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), err)
+	}
+	return nil
+}
+
+// environWithout is the process's environment less the variables
+// whose names bear the prefix in any case: windows reads a variable's
+// name without regard to case, so `uv_index_url` is `UV_INDEX_URL`
+// there.
+func environWithout(prefix string) []string {
+	var environ []string
+	for _, kv := range os.Environ() {
+		if len(kv) < len(prefix) || !strings.EqualFold(kv[:len(prefix)], prefix) {
+			environ = append(environ, kv)
+		}
+	}
+	return environ
 }
 
 // output executes a command and returns its standard output.
@@ -191,6 +218,80 @@ func copyTree(from, to string, irregular func(path string) error) error {
 // regular file.
 func irregularRefused(path string) error {
 	return fmt.Errorf("%s: not a regular file", path)
+}
+
+// dropLinks removes every symbolic link under dir: an image pb runs
+// carries none, and a runtime's build lays some down (jlink's
+// `legal/` notices, a CPython build's `bin/` and `lib/` aliases),
+// none of which the runtime needs.
+func dropLinks(dir string) error {
+	return filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.Type()&fs.ModeSymlink != 0 {
+			return os.Remove(p)
+		}
+		return nil
+	})
+}
+
+// toolCache is where the tools and runtimes a build fetches are kept
+// extracted once fetched, under the user's cache directory (the
+// temporary directory where the host names none): a build fetches
+// every platform's runtime and a live test every plugin's, and each
+// is fetched once for all of them; a test points it elsewhere. A
+// tool lies under the checksum its publisher states for it,
+// extracted beside its place and moved in whole, so a directory in
+// place is a complete extraction of those bytes and is never
+// removed; the user's own directory, which another user of the host
+// cannot plant.
+var toolCache = func() string {
+	dir, err := os.UserCacheDir()
+	if err != nil {
+		dir = os.TempDir()
+	}
+	return filepath.Join(dir, "pb-plugins")
+}()
+
+// cached is the directory under the cache holding the tool's release
+// for the platform at the checksum, extracted by `extract` into it
+// on a miss. Extracted beside its place and moved in whole; two
+// builds missing the cache together both extract, the second's move
+// finding the first's in place and keeping it. An extraction a
+// killed build left beside is swept on a later miss once it is
+// older than any extraction runs, so one in progress beside is left
+// alone.
+func cached(tool, release, platform, checksum string, extract func(dir string) error) (string, error) {
+	dir := filepath.Join(toolCache, tool, release, strings.ReplaceAll(platform, "/", "-"), checksum)
+	if _, err := os.Stat(dir); err == nil {
+		return dir, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
+		return "", err
+	}
+	if stale, _ := filepath.Glob(filepath.Join(filepath.Dir(dir), ".extract-*")); len(stale) > 0 {
+		for _, s := range stale {
+			if st, err := os.Stat(s); err == nil && time.Since(st.ModTime()) > staleExtraction {
+				os.RemoveAll(s)
+			}
+		}
+	}
+	tmp, err := os.MkdirTemp(filepath.Dir(dir), ".extract-")
+	if err != nil {
+		return "", err
+	}
+	if err := extract(tmp); err != nil {
+		os.RemoveAll(tmp)
+		return "", err
+	}
+	if err := os.Rename(tmp, dir); err != nil {
+		os.RemoveAll(tmp)
+		if _, statErr := os.Stat(dir); statErr != nil {
+			return "", err
+		}
+	}
+	return dir, nil
 }
 
 // holdExecutable holds an executable to layDown's rule for the

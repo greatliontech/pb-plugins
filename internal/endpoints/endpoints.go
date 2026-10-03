@@ -28,6 +28,16 @@ var (
 	// serves the bundles.
 	SwiftOrg      = "https://www.swift.org"
 	SwiftDownload = "https://download.swift.org"
+	// PyPI answers a project's releases as JSON; PyPISimple is the
+	// index an installer resolves packages from.
+	PyPI       = "https://pypi.org/pypi"
+	PyPISimple = "https://pypi.org/simple"
+	// PythonStandalone serves the standalone CPython builds per
+	// platform, a release's checksums beside them in SHA256SUMS; Uv
+	// serves uv's own binaries per platform, each with its sha256
+	// beside it.
+	PythonStandalone = "https://github.com/astral-sh/python-build-standalone/releases/download"
+	Uv               = "https://github.com/astral-sh/uv/releases/download"
 )
 
 // UserAgent names the catalog to a registry that asks every client

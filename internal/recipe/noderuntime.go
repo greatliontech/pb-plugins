@@ -1,8 +1,6 @@
 package recipe
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -11,7 +9,6 @@ import (
 
 	"github.com/greatliontech/pb-plugins/internal/catalog"
 	"github.com/greatliontech/pb-plugins/internal/endpoints"
-	"github.com/greatliontech/pb-plugins/internal/web"
 )
 
 // buildNodeRuntime lays a runtime node recipe's trees down for every
@@ -100,21 +97,7 @@ func nodeArchive(release, platform string) (archive, member string) {
 // nodeChecksums reads the release's SHASUMS256.txt: the sha256 of
 // each archive by its name.
 func nodeChecksums(ctx context.Context, release string) (map[string]string, error) {
-	body, err := web.Get(ctx, endpoints.NodeDist+"/v"+release+"/SHASUMS256.txt", nil)
-	if err != nil {
-		return nil, err
-	}
-	sums := map[string]string{}
-	sc := bufio.NewScanner(bytes.NewReader(body))
-	for sc.Scan() {
-		if fields := strings.Fields(sc.Text()); len(fields) == 2 {
-			sums[fields[1]] = strings.ToLower(fields[0])
-		}
-	}
-	if len(sums) == 0 {
-		return nil, fmt.Errorf("node v%s: SHASUMS256.txt names no archive", release)
-	}
-	return sums, nil
+	return publishedSums(ctx, endpoints.NodeDist+"/v"+release+"/SHASUMS256.txt")
 }
 
 // fetchNode fetches the release's archive for the platform, holds it
@@ -126,14 +109,5 @@ func fetchNode(ctx context.Context, release, platform string, sums map[string]st
 	if !ok {
 		return fmt.Errorf("node v%s: SHASUMS256.txt names no %s", release, archive)
 	}
-	tmp, size, err := downloadHeld(ctx, endpoints.NodeDist+"/v"+release+"/"+archive, want, "nodejs.org")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	defer tmp.Close()
-	if strings.HasSuffix(archive, ".zip") {
-		return extractZip(tmp, size, member, out)
-	}
-	return extractTarMember(tmp, member, out)
+	return fetchMember(ctx, endpoints.NodeDist+"/v"+release+"/"+archive, want, "nodejs.org", member, out)
 }

@@ -14,6 +14,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1410,9 +1411,9 @@ func TestBuildJvm(t *testing.T) {
 		*ep = srv.URL
 		defer func() { *ep = saved }()
 	}
-	savedCache := jdkCache
-	jdkCache = t.TempDir()
-	defer func() { jdkCache = savedCache }()
+	savedCache := toolCache
+	toolCache = t.TempDir()
+	defer func() { toolCache = savedCache }()
 	exe := fakePlugin(t)
 	t.Setenv("PROBE_MODE", "file")
 	bin := t.TempDir()
@@ -1431,12 +1432,13 @@ func TestBuildJvm(t *testing.T) {
 	if err := os.WriteFile(darwinLauncher, machoLoading(macho.CpuArm64, "@rpath/libjli.dylib", "/System/Library/Frameworks/Cocoa.framework/Versions/A/Cocoa", "/System/Library/Frameworks/Security.framework/Versions/A/Security", "/usr/lib/libSystem.B.dylib", "rpath:@loader_path/.", "rpath:@loader_path/../lib"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// A windows runtime's launcher comes out of jlink as java.exe.
+	// A windows runtime's launcher comes out of jlink as java.exe;
+	// jlink's legal/ notices are links to one another.
 	darwinOutput := darwinLauncher
 	if runtime.GOOS == "darwin" {
 		darwinOutput = exe
 	}
-	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + log + "\nwhile [ $# -gt 0 ]; do if [ \"$1\" = --output ]; then out=$2; fi; shift; done\nmkdir -p \"$out/bin\" \"$out/lib\"\ncase \"$out\" in *darwin-*) cp " + darwinOutput + " \"$out/bin/java\";; *windows-*) cp " + exe + " \"$out/bin/java.exe\";; *) cp " + exe + " \"$out/bin/java\";; esac\nprintf x > \"$out/lib/jspawnhelper\"\n"
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + log + "\nwhile [ $# -gt 0 ]; do if [ \"$1\" = --output ]; then out=$2; fi; shift; done\nmkdir -p \"$out/bin\" \"$out/lib\"\ncase \"$out\" in *darwin-*) cp " + darwinOutput + " \"$out/bin/java\";; *windows-*) cp " + exe + " \"$out/bin/java.exe\";; *) cp " + exe + " \"$out/bin/java\";; esac\nprintf x > \"$out/lib/jspawnhelper\"\nmkdir -p \"$out/legal/java.base\" && printf n > \"$out/legal/java.base/NOTICE\" && ln -s NOTICE \"$out/legal/java.base/ADDITIONAL_LICENSE_INFO\"\n"
 	if err := os.WriteFile(filepath.Join(bin, "jlink"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -1463,13 +1465,20 @@ func TestBuildJvm(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(tree, "jre", "bin", "java.exe")); err == nil {
 			t.Errorf("%s: java.exe left beside the launcher", pl)
 		}
+		// jlink's notice links are dropped, the notices kept.
+		if _, err := os.Lstat(filepath.Join(tree, "jre", "legal", "java.base", "ADDITIONAL_LICENSE_INFO")); err == nil {
+			t.Errorf("%s: a link left in the runtime", pl)
+		}
+		if _, err := os.Stat(filepath.Join(tree, "jre", "legal", "java.base", "NOTICE")); err != nil {
+			t.Errorf("%s: the notice: %v", pl, err)
+		}
 	}
 	calls, err := os.ReadFile(log)
 	if err != nil {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(calls)), "\n")
-	if len(lines) != len(platforms) || !strings.Contains(lines[0], "--add-modules "+strings.Join(catalog.JvmModules, ",")+" --strip-java-debug-attributes --no-header-files --no-man-pages --compress zip-6 --output "+filepath.Join(TreeDir(out, Host()), "jre")) || !strings.Contains(lines[0], "--module-path "+filepath.Join(jdkCache, "21.0.12.1+1", strings.ReplaceAll(Host(), "/", "-"))) {
+	if len(lines) != len(platforms) || !strings.Contains(lines[0], "--add-modules "+strings.Join(catalog.JvmModules, ",")+" --strip-java-debug-attributes --no-header-files --no-man-pages --compress zip-6 --output "+filepath.Join(TreeDir(out, Host()), "jre")) || !strings.Contains(lines[0], "--module-path "+filepath.Join(toolCache, "jdk", "21.0.12.1+1", strings.ReplaceAll(Host(), "/", "-"))) {
 		t.Errorf("jlink's calls: %q", lines)
 	}
 	if count("/g/h/a/1.0.0/a-1.0.0-c.jar") != 1 {
@@ -1485,15 +1494,15 @@ func TestBuildJvm(t *testing.T) {
 	if count(hostJDK) != 1 {
 		t.Errorf("the JDK fetched %d times after a hit", count(hostJDK))
 	}
-	if _, err := os.Stat(filepath.Join(jdkCache, "21.0.12.1+1", strings.ReplaceAll(Host(), "/", "-"), jdkSum, "jdk-21.0.12.1+1", "jmods")); err != nil {
+	if _, err := os.Stat(filepath.Join(toolCache, "jdk", "21.0.12.1+1", strings.ReplaceAll(Host(), "/", "-"), jdkSum, "jdk-21.0.12.1+1", "jmods")); err != nil {
 		t.Errorf("the JDK's place under its checksum: %v", err)
 	}
-	if torn, err := filepath.Glob(filepath.Join(jdkCache, "21.0.12.1+1", "*", ".extract-*")); err != nil || len(torn) != 0 {
+	if torn, err := filepath.Glob(filepath.Join(toolCache, "jdk", "21.0.12.1+1", "*", ".extract-*")); err != nil || len(torn) != 0 {
 		t.Errorf("extractions left beside their place: %v %v", torn, err)
 	}
 	// An extraction a killed build left beside is swept on a miss
 	// once it is old; one in progress (young) is left alone.
-	beside := filepath.Join(jdkCache, "21.0.12.1+1", strings.ReplaceAll(Host(), "/", "-"))
+	beside := filepath.Join(toolCache, "jdk", "21.0.12.1+1", strings.ReplaceAll(Host(), "/", "-"))
 	stale, young := filepath.Join(beside, ".extract-stale"), filepath.Join(beside, ".extract-young")
 	for _, d := range []string{stale, young} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
@@ -1533,7 +1542,7 @@ func TestBuildJvm(t *testing.T) {
 	if _, err := fetchJmods(context.Background(), "21.0.12.1+1", "darwin/amd64"); err == nil || !strings.Contains(err.Error(), "Adoptium publishes") {
 		t.Errorf("an archive disagreeing with Adoptium's checksum: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(jdkCache, "21.0.12.1+1", "darwin-amd64", strings.Repeat("0", 64))); err == nil {
+	if _, err := os.Stat(filepath.Join(toolCache, "jdk", "21.0.12.1+1", "darwin-amd64", strings.Repeat("0", 64))); err == nil {
 		t.Error("a disagreeing archive kept in the cache")
 	}
 	// A jar whose digest disagrees with Maven's is refused.
@@ -1684,7 +1693,7 @@ func TestBuildNodeRuntime(t *testing.T) {
 	unix := tarGz(t, map[string]string{"node-v24.21.0-linux-x64/bin/": "", "node-v24.21.0-linux-x64/bin/node": fakeNode, "node-v24.21.0-linux-x64/LICENSE": "l"}, nil)
 	mac := tarGz(t, map[string]string{"node-v24.21.0-darwin-arm64/bin/node": string(machoLoading(macho.CpuArm64, "/usr/lib/libSystem.B.dylib"))}, nil)
 	win := zipped(t, map[string]string{"node-v24.21.0-win-arm64/node.exe": string(exeBytes)})
-	sums := "deadbeef  node-v24.21.0-linux-arm64.tar.gz\n" + sha256Of(unix) + "  node-v24.21.0-linux-x64.tar.gz\n" + sha256Of(mac) + "  node-v24.21.0-darwin-arm64.tar.gz\n" + sha256Of(win) + "  node-v24.21.0-win-arm64.zip\n"
+	sums := strings.Repeat("0", 64) + "  node-v24.21.0-linux-arm64.tar.gz\n" + sha256Of(unix) + "  node-v24.21.0-linux-x64.tar.gz\n" + sha256Of(mac) + "  node-v24.21.0-darwin-arm64.tar.gz\n" + sha256Of(win) + "  node-v24.21.0-win-arm64.zip\n"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v24.21.0/SHASUMS256.txt":
@@ -1754,7 +1763,7 @@ func TestBuildNodeRuntime(t *testing.T) {
 	}
 	// A binary disagreeing with the published checksum is refused.
 	c.Plugins["a/b"].Platforms = []string{"linux/arm64"}
-	if err := Build(context.Background(), c, "a/b", "v1.0.0", []string{"linux/arm64"}, t.TempDir()); err == nil || !strings.Contains(err.Error(), "nodejs.org publishes deadbeef") {
+	if err := Build(context.Background(), c, "a/b", "v1.0.0", []string{"linux/arm64"}, t.TempDir()); err == nil || !strings.Contains(err.Error(), "nodejs.org publishes "+strings.Repeat("0", 64)) {
 		t.Errorf("a binary disagreeing with the checksum: %v", err)
 	}
 	// A script the package's bin does not name is refused.
@@ -2024,5 +2033,235 @@ func TestGoBuildArgs(t *testing.T) {
 	}
 	if got := strings.Join(goBuildArgs([]string{"a", "b"}, "o", "m/p"), " "); got != "build -trimpath -ldflags=-s -w -buildid= -o o -tags a,b m/p" {
 		t.Errorf("tags: %q", got)
+	}
+}
+
+// A python build fetches uv and the host's standalone interpreter at
+// their published checksums into the cache, installs the package
+// for each platform under app/ by uv, writes the launcher from the
+// console script the package names, lays the platform's interpreter
+// down as python/bin/python3 with no link left, holds the darwin
+// tree, and probes the host's tree as the image runs it; uv here a
+// script laying a package down, the host's interpreter a script
+// holding its arguments and answering as the fake plugin.
+func TestBuildPython(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uv and the interpreter are shell scripts here")
+	}
+	if Host() != "linux/amd64" {
+		t.Skip("the fixture's host is linux/amd64")
+	}
+	exe := fakePlugin(t)
+	exeBytes, err := os.ReadFile(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	savedCache := toolCache
+	toolCache = t.TempDir()
+	defer func() { toolCache = savedCache }()
+	t.Setenv("PROBE_MODE", "file")
+	// The host's interpreter holds the image's argv: isolated, the
+	// launcher relative to the tree, present.
+	fakePython := "#!/bin/sh\n[ \"$1\" = -I ] && [ \"$2\" = app/e.py ] && [ -f \"$2\" ] || { echo \"python: $* (in $PWD)\" >&2; exit 7; }\nexec " + exe + "\n"
+	// The build's bin/ holds scripts beside the interpreter (pip's,
+	// pydoc's) and links to it, all dropped.
+	// The build's share/ and include/ are not the runtime's; terminfo
+	// holds names differing by case alone, which a folding host
+	// cannot lay side by side.
+	host := tarGz(t, map[string]string{"python/bin/python3.13": fakePython, "python/bin/pip3.13": "#!/bin/sh\n", "python/bin/python3.13-config": "#!/bin/sh\n", "python/lib/python3.13/os.py": "o", "python/lib/libpython3.13.so": "l", "python/share/": "", "python/share/terminfo/h/hp2621": "t", "python/include/": "", "python/include/python3.13/Python.h": "h"}, map[string]string{"python/bin/python3": "python3.13", "python/bin/python": "python3.13", "python/bin/pip3": "pip3.13", "python/lib/libpython3.so": "libpython3.13.so", "python/share/terminfo/2/2621a": "../h/hp2621", "python/share/terminfo/2/2621A": "../h/hp2621"})
+	darwinInterp := machoLoading(macho.CpuArm64, "/usr/lib/libSystem.B.dylib", "rpath:@executable_path/../lib")
+	// A library of the build bound through the interpreter's own
+	// location, as an extension module binding a bundled library is.
+	darwinLib := machoLoading(macho.CpuArm64, "/usr/lib/libSystem.B.dylib", "@executable_path/../lib/libz.dylib")
+	binary.LittleEndian.PutUint32(darwinLib[12:], uint32(macho.TypeDylib))
+	mac := tarGz(t, map[string]string{"python/bin/python3.13": string(darwinInterp), "python/lib/libpython3.13.dylib": string(darwinLib)}, map[string]string{"python/bin/python3": "python3.13"})
+	win := tarGz(t, map[string]string{"python/python.exe": string(exeBytes), "python/pythonw.exe": string(exeBytes), "python/python313.dll": "d", "python/python3.dll": "d", "python/vcruntime140.dll": "v", "python/Lib/os.py": "o", "python/DLLs/_x.pyd": "x"}, nil)
+	release, tag := "3.13.16+20261001", "20261001"
+	archive := func(pl string) string { return pythonArchive(release, pl) }
+	sums := sha256Of(host) + "  " + archive("linux/amd64") + "\n" + strings.Repeat("0", 64) + "  " + archive("linux/arm64") + "\n" + sha256Of(mac) + "  " + archive("darwin/arm64") + "\n" + sha256Of(win) + "  " + archive("windows/arm64") + "\n"
+	log := filepath.Join(t.TempDir(), "log")
+	// uv records its call and whether a UV_ variable reached it, and
+	// lays the package down under --target: a distribution naming the
+	// console script with an extras suffix, its module beside, a
+	// script under bin/ with the host's shebang, and a dependency
+	// sorting before it naming the same script; under
+	// FAKE_UV_NOENTRY the package's script named is another.
+	fakeUv := "#!/bin/sh\nprintf '%s uvenv=%s\\n' \"$*\" \"$UV_INDEX_URL\" >> " + log + "\nwhile [ $# -gt 0 ]; do if [ \"$1\" = --target ]; then out=$2; fi; shift; done\nmkdir -p \"$out/P.x-1.0.0.dist-info\" \"$out/a-1.0.0.dist-info\" \"$out/pmod\" \"$out/bin\" && printf '[console_scripts]\\n%s = pmod:main [extra]\\n' \"${FAKE_UV_NOENTRY:-e}\" > \"$out/P.x-1.0.0.dist-info/entry_points.txt\" && printf '[console_scripts]\\ne = other:main\\n' > \"$out/a-1.0.0.dist-info/entry_points.txt\" && printf 'def main(): pass\\n' > \"$out/pmod/__init__.py\" && printf '#!/host/python3\\n' > \"$out/bin/e\"\n"
+	uvTar := tarGz(t, map[string]string{"uv-x86_64-unknown-linux-gnu/uv": fakeUv}, nil)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/" + tag + "/SHA256SUMS":
+			fmt.Fprint(w, sums)
+		case "/" + tag + "/" + archive("linux/amd64"):
+			w.Write(host)
+		case "/" + tag + "/" + archive("linux/arm64"):
+			w.Write(host) // disagreeing with its published checksum
+		case "/" + tag + "/" + archive("darwin/arm64"):
+			w.Write(mac)
+		case "/" + tag + "/" + archive("windows/arm64"):
+			w.Write(win)
+		case "/00000000/SHA256SUMS":
+			fmt.Fprint(w, "\n")
+		case "/11111111/SHA256SUMS":
+			fmt.Fprint(w, "deadbeef  cpython-x.tar.gz\n")
+		case "/0.12.22/uv-x86_64-unknown-linux-gnu.tar.gz":
+			w.Write(uvTar)
+		case "/0.12.22/uv-x86_64-unknown-linux-gnu.tar.gz.sha256":
+			fmt.Fprint(w, sha256Of(uvTar)+"  uv-x86_64-unknown-linux-gnu.tar.gz\n")
+		case "/0.0.1/uv-x86_64-unknown-linux-gnu.tar.gz":
+			w.Write(uvTar)
+		case "/0.0.1/uv-x86_64-unknown-linux-gnu.tar.gz.sha256":
+			fmt.Fprint(w, strings.Repeat("0", 64)+"  uv-x86_64-unknown-linux-gnu.tar.gz\n")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	savedPy, savedUv, savedIndex := endpoints.PythonStandalone, endpoints.Uv, endpoints.PyPISimple
+	endpoints.PythonStandalone, endpoints.Uv, endpoints.PyPISimple = srv.URL, srv.URL, srv.URL+"/simple"
+	defer func() { endpoints.PythonStandalone, endpoints.Uv, endpoints.PyPISimple = savedPy, savedUv, savedIndex }()
+	// A UV_ variable of the host's does not reach uv, in any case.
+	t.Setenv("UV_INDEX_URL", "https://planted.example/simple")
+	t.Setenv("uv_extra_index_url", "https://planted.example/simple")
+	for _, kv := range environWithout("UV_") {
+		if strings.HasPrefix(strings.ToLower(kv), "uv_") {
+			t.Errorf("a UV_ variable kept: %s", kv)
+		}
+	}
+	platforms := []string{"linux/amd64", "darwin/arm64", "windows/arm64"}
+	// The package's name as the project spells it; its wheel's
+	// distribution directory spells it as a legacy wheel does.
+	c := &catalog.Catalog{Toolchains: map[string]string{"python": release, "uv": "0.12.22"}, Plugins: map[string]*catalog.Plugin{"a/b": {Kind: catalog.KindPython, Pypi: "p-x", Entrypoint: "e", Platforms: platforms}}}
+	out := t.TempDir()
+	if err := Build(context.Background(), c, "a/b", "v1.0.0", platforms, out); err != nil {
+		t.Fatal(err)
+	}
+	hostPython := filepath.Join(toolCache, "python", release, "linux-amd64", sha256Of(host), "python", "bin", "python3.13")
+	calls, _ := os.ReadFile(log)
+	lines := strings.Split(strings.TrimSpace(string(calls)), "\n")
+	if len(lines) != len(platforms) {
+		t.Fatalf("uv's calls: %q", lines)
+	}
+	for i, pl := range platforms {
+		tree := TreeDir(out, pl)
+		want := "pip install --no-config --default-index " + srv.URL + "/simple --python " + hostPython + " --python-platform " + pythonTriple(pl) + " --python-version 3.13.16 --only-binary :all: --no-cache --target " + filepath.Join(tree, "app") + " p-x==1.0.0 uvenv="
+		if lines[i] != want {
+			t.Errorf("%s: uv's call %q, wanted %q", pl, lines[i], want)
+		}
+		launcher, err := os.ReadFile(filepath.Join(tree, "app", "e.py"))
+		if err != nil || !strings.Contains(string(launcher), `importlib.import_module("pmod")`) || !strings.Contains(string(launcher), `"main".split(".")`) {
+			t.Errorf("%s: the launcher: %q %v", pl, launcher, err)
+		}
+		if fi, err := os.Lstat(filepath.Join(tree, "python", "bin", "python3")); err != nil || !fi.Mode().IsRegular() {
+			t.Errorf("%s: the interpreter: %v %v", pl, fi, err)
+		}
+		// The scripts uv wrote under app/bin are gone, the build's
+		// share/ and include/ never laid down.
+		for _, gone := range []string{"app/bin", "python/share", "python/include"} {
+			if _, err := os.Stat(filepath.Join(tree, filepath.FromSlash(gone))); err == nil {
+				t.Errorf("%s: %s in the tree", pl, gone)
+			}
+		}
+		filepath.WalkDir(tree, func(p string, d fs.DirEntry, err error) error {
+			if err == nil && d.Type()&fs.ModeSymlink != 0 {
+				t.Errorf("%s: a link in the tree: %s", pl, p)
+			}
+			return nil
+		})
+	}
+	// The host's bin/ holds the interpreter alone; the windows tree
+	// holds it under bin/ with its libraries and the path file, the
+	// build's own layout gone.
+	if entries, err := os.ReadDir(filepath.Join(TreeDir(out, "linux/amd64"), "python", "bin")); err != nil || len(entries) != 1 || entries[0].Name() != "python3" {
+		t.Errorf("the host's bin/: %v %v", entries, err)
+	}
+	winBin := filepath.Join(TreeDir(out, "windows/arm64"), "python", "bin")
+	for _, f := range []string{"python3", "python313.dll", "python3.dll", "vcruntime140.dll"} {
+		if _, err := os.Stat(filepath.Join(winBin, f)); err != nil {
+			t.Errorf("the windows tree's bin/%s: %v", f, err)
+		}
+	}
+	if pth, err := os.ReadFile(filepath.Join(winBin, "python3._pth")); err != nil || string(pth) != "../Lib\n../DLLs\n" {
+		t.Errorf("the windows tree's path file: %q %v", pth, err)
+	}
+	for _, f := range []string{"python.exe", "pythonw.exe", "python313.dll"} {
+		if _, err := os.Stat(filepath.Join(TreeDir(out, "windows/arm64"), "python", f)); err == nil {
+			t.Errorf("the windows tree's %s left at the root", f)
+		}
+	}
+	// uv and the host's interpreter are kept under the cache.
+	if _, err := os.Stat(filepath.Join(toolCache, "uv", "0.12.22", "linux-amd64", sha256Of(uvTar), "uv")); err != nil {
+		t.Errorf("uv in the cache: %v", err)
+	}
+	if _, err := os.Stat(hostPython); err != nil {
+		t.Errorf("the host's interpreter in the cache: %v", err)
+	}
+	// An interpreter disagreeing with the published checksum is refused.
+	c.Plugins["a/b"].Platforms = []string{"linux/arm64"}
+	if err := Build(context.Background(), c, "a/b", "v1.0.0", []string{"linux/arm64"}, t.TempDir()); err == nil || !strings.Contains(err.Error(), "python-build-standalone publishes "+strings.Repeat("0", 64)) {
+		t.Errorf("an interpreter disagreeing with the checksum: %v", err)
+	}
+	// A package whose console scripts name no entrypoint is refused.
+	c.Plugins["a/b"].Platforms = platforms[:1]
+	t.Setenv("FAKE_UV_NOENTRY", "other")
+	if err := Build(context.Background(), c, "a/b", "v1.0.0", platforms[:1], t.TempDir()); err == nil || !strings.Contains(err.Error(), "console scripts name no e") {
+		t.Errorf("a package naming no entrypoint: %v", err)
+	}
+	t.Setenv("FAKE_UV_NOENTRY", "")
+	// A uv disagreeing with the sha256 published beside it is refused.
+	c.Toolchains["uv"] = "0.0.1"
+	if err := Build(context.Background(), c, "a/b", "v1.0.0", platforms[:1], t.TempDir()); err == nil || !strings.Contains(err.Error(), "uv's release publishes") {
+		t.Errorf("a uv disagreeing with its checksum: %v", err)
+	}
+	// A release whose checksums name no archive is refused.
+	c.Toolchains["uv"], c.Toolchains["python"] = "0.12.22", "3.13.16+00000000"
+	if err := Build(context.Background(), c, "a/b", "v1.0.0", platforms[:1], t.TempDir()); err == nil || !strings.Contains(err.Error(), "SHA256SUMS names no archive") {
+		t.Errorf("checksums naming no archive: %v", err)
+	}
+	// A checksum line of another shape is refused whole.
+	c.Toolchains["python"] = "3.13.16+11111111"
+	if err := Build(context.Background(), c, "a/b", "v1.0.0", platforms[:1], t.TempDir()); err == nil || !strings.Contains(err.Error(), `"deadbeef  cpython-x.tar.gz" is no sha256 and a name`) {
+		t.Errorf("a checksum of another shape: %v", err)
+	}
+}
+
+// The python recipes build on this host at the versions the catalog
+// holds, bufbuild/py for every platform and the rest for the host
+// (network: PyPI, python-build-standalone's and uv's releases). Runs
+// where PBPLUGINS_LIVE is set.
+func TestPythonKindLive(t *testing.T) {
+	if os.Getenv("PBPLUGINS_LIVE") == "" {
+		t.Skip("PBPLUGINS_LIVE unset")
+	}
+	c, err := catalog.Load("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	built := 0
+	for _, name := range c.Names() {
+		p := c.Plugins[name]
+		if p.Kind != catalog.KindPython {
+			continue
+		}
+		platforms := []string{Host()}
+		if name == "bufbuild/py" {
+			platforms = p.PlatformsOf()
+		}
+		for _, version := range p.Versions {
+			out := t.TempDir()
+			if err := Build(context.Background(), c, name, version, platforms, out); err != nil {
+				t.Errorf("%s %s: %v", name, version, err)
+				continue
+			}
+			for _, pl := range platforms {
+				if fi, err := os.Stat(filepath.Join(TreeDir(out, pl), "python", "bin", "python3")); err != nil || fi.Size() == 0 {
+					t.Errorf("%s %s %s: the interpreter: %v", name, version, pl, err)
+				}
+			}
+			built++
+		}
+	}
+	if built < 3 {
+		t.Errorf("%d python plugin versions built, the catalog holding three at least", built)
 	}
 }

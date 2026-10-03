@@ -36,12 +36,11 @@ The catalog mirrors buf's registry by owner: every plugin under
 and `pluginrpc`, and of the rest `apple/swift`,
 `community/scalapb-scala`, `community/scalapb-zio-grpc`,
 `community/planetscale-vtprotobuf` and the community generators the
-`go` and `node` kinds build. A plugin enters when its kind exists:
-the kinds below first, then a kind for the rest — `python`. A
-plugin that is a program for a runtime rather than one executable
-(a jar, a Python package) ships the runtime in its image beside the
-program, the image's process the runtime's launcher over it, never
-compiled to a native executable here; ScalaPB's protoc-gen-scala
+`go` and `node` kinds build. A plugin enters when its kind exists,
+the kinds below. A plugin that is a program for a runtime rather
+than one executable (a jar, a Python package) ships the runtime in
+its image beside the program, the image's process the runtime's
+launcher over it, never compiled to a native executable here; ScalaPB's protoc-gen-scala
 is such a program, served from the jar Maven publishes for every
 version, as buf serves it.
 
@@ -56,6 +55,7 @@ version, as buf serves it.
 | `swift` | a SwiftPM product built by swift at the repository's tag on a runner of the platform itself, with the toolchain the catalog pins (`toolchains`), with swift.org's static Linux SDK on linux so the executable is static (held to be before it is laid down, its symbols stripped), resolved to the lockfile the package commits where it commits one | linux and darwin on both architectures (no upstream builds its generator on windows) | the repository's releases |
 | `dart` | a Dart package's script compiled by `dart compile exe` at the repository's tag on a runner of the platform itself, with the SDK the catalog pins (`toolchains`), its dependencies resolved by pub as the manifest allows | all six | the repository's releases |
 | `jvm` | a jar from Maven Central at its coordinates (`maven`, a `classifier` and an `extension` where the file bears them), verified against the digest Maven publishes beside it (`checksum`: its sha256 where it has one, its sha1 for every artifact), bundled with a runtime jlink'd for every platform on one host from the pinned JDK's modules (`toolchains`, Temurin's release, its assets at Adoptium's checksums; `modules` where the kind's own list does not serve), the image's process `/jre/bin/java -jar <jar>` with the jar named relative to the working directory, the tree's root, processes forked rather than spawned through the runtime's helper | all six | Maven Central's metadata |
+| `python` | a PyPI package's console script (`pypi`, the package; the entrypoint the script's name among the package's console scripts) run by the standalone CPython build bundled for every platform from python-build-standalone at the release the catalog pins (`toolchains`, CPython's version and the release tag, the assets at the checksums the release publishes), the package and its dependencies installed per platform by uv (`toolchains`, at its published checksum) from PyPI's index under no configuration of the host's, which picks that platform's wheels and reads the dependencies' markers for it, under `app/`; the interpreter laid down as `python/bin/python3` on every platform, no link in the tree; the image's process `/python/bin/python3 -I app/<entrypoint>.py`, the launcher written from the console script's entry | all six; a recipe those its package's and its dependencies' wheels cover | PyPI |
 | `rust` | a crate's executable installed by cargo on a runner of the platform itself, with the toolchain the catalog pins (`toolchains`), for the musl target on linux so the executable is static (held to be before it is laid down; a crate whose C dependencies need a musl C toolchain beyond the runner's compiler fails its tree job), locked to the lockfile the crate publishes (one without is refused) | all six | crates.io |
 
 Every kind's trees are held to the plugin protocol before they are
@@ -98,11 +98,12 @@ A kind lays out, per platform, the tree the image's process runs
 from: for most kinds one file, the entrypoint at the tree's root,
 which the image carries as `/<entrypoint>`; for the `jvm` kind the
 runtime under `jre/` beside the jar, for a runtime `node` recipe
-node's binary beside the package under `app/`, the image's process
-the runtime's launcher over it. The Linux
-executables of the `node`, `release`, `bazel`, `dart` and `jvm`
-kinds may link the platform's C library (dart's and java's runtimes
-do), so their Linux
+node's binary beside the package under `app/`, for a `python` recipe
+the interpreter under `python/` beside the package and its launcher
+under `app/`, the image's process the runtime's launcher over it. The Linux
+executables of the `node`, `release`, `bazel`, `dart`, `jvm` and
+`python` kinds may link the platform's C library (dart's, java's
+and python's runtimes do), so their Linux
 trees are layered over the catalog's `base` (distroless `cc`, pinned
 by index digest and resolved to the platform's image at publish);
 the `go`, `rust` and `swift` kinds are static and take no base. On an `OS` sandbox row pb
@@ -112,13 +113,16 @@ kinds' plugins run natively.
 A rust, swift or dart recipe, like a bazel one, builds on a runner
 of the platform itself: cargo installs the crate from crates.io,
 swift builds the package at its tag, dart compiles the package's
-script, for the host alone; a jvm recipe, and a runtime node
-recipe, builds every platform on one host: jlink links each
-platform's runtime from that platform's modules, node's binary is
-prebuilt for every platform. The pipeline installs the kind's pinned
+script, for the host alone; a jvm recipe, a runtime node recipe and
+a python recipe build every platform on one host: jlink links each
+platform's runtime from that platform's modules, node's and
+CPython's binaries are prebuilt for every platform, uv installs a
+package for a platform other than the host's. The pipeline installs the kind's pinned
 toolchain on the runner first (rustup, swiftly, the Dart SDK from
 Google's archive at the checksum published beside it, the Temurin
-JDK from Adoptium at the checksum it publishes) and, on linux,
+JDK from Adoptium at the checksum it publishes; a python recipe's
+interpreter and uv the build fetches for itself, at the checksums
+their releases publish, into the user's cache) and, on linux,
 what makes the executable static beside it
 (cargo's musl target, swift.org's static Linux SDK at the checksum
 the catalog pins, held equal to the one swift.org publishes). A

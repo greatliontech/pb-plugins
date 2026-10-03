@@ -102,14 +102,14 @@ func Compute(ctx context.Context, c *catalog.Catalog, exists Exists, all bool) (
 					plan.Trees.Include = append(plan.Trees.Include, Tree{
 						Plugin: name, Version: v, Kind: string(p.Kind), Platforms: pl,
 						Runner: runners[pl], Build: build, Tree: build + "-" + os + "-" + arch,
-						Toolchain: c.Toolchains[string(p.Kind)],
+						Toolchain: c.Installed(p.Kind),
 					})
 				}
 			} else {
 				plan.Cross.Include = append(plan.Cross.Include, Tree{
 					Plugin: name, Version: v, Kind: string(p.Kind), Platforms: strings.Join(p.PlatformsOf(), ","),
 					Runner: CrossRunner, Build: build, Tree: build + "-cross",
-					Toolchain: c.Toolchains[string(p.Kind)],
+					Toolchain: c.Installed(p.Kind),
 				})
 			}
 		}

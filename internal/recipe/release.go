@@ -3,6 +3,8 @@ package recipe
 import (
 	"archive/tar"
 	"archive/zip"
+	"bufio"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/sha1"
@@ -192,6 +194,49 @@ func downloadHeld(ctx context.Context, url, sha, publisher string) (*os.File, in
 		return nil, 0, err
 	}
 	return tmp, size, nil
+}
+
+// publishedSums reads a checksum file as the release publishers
+// write them, a sha256 and an archive's name per line: the sha256
+// of each archive by its name, a line of another shape refused,
+// a file naming no archive refused.
+func publishedSums(ctx context.Context, url string) (map[string]string, error) {
+	body, err := web.Get(ctx, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	sums := map[string]string{}
+	sc := bufio.NewScanner(bytes.NewReader(body))
+	for sc.Scan() {
+		fields := strings.Fields(sc.Text())
+		if len(fields) == 0 {
+			continue
+		}
+		if len(fields) != 2 || !sha256RE.MatchString(fields[0]) {
+			return nil, fmt.Errorf("%s: %q is no sha256 and a name", url, sc.Text())
+		}
+		sums[fields[1]] = strings.ToLower(fields[0])
+	}
+	if len(sums) == 0 {
+		return nil, fmt.Errorf("%s names no archive", url)
+	}
+	return sums, nil
+}
+
+// fetchMember fetches the archive at url, holds it to the sha256
+// its publisher states, and lays its member down at out: a zip's by
+// the archive's name, a tar's otherwise.
+func fetchMember(ctx context.Context, url, sha, publisher, member, out string) error {
+	tmp, size, err := downloadHeld(ctx, url, sha, publisher)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	defer tmp.Close()
+	if strings.HasSuffix(url, ".zip") {
+		return extractZip(tmp, size, member, out)
+	}
+	return extractTarMember(tmp, member, out)
 }
 
 // verify compares the file's digest with the one upstream publishes
