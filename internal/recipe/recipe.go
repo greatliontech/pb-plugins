@@ -13,11 +13,14 @@ import (
 	"context"
 	"debug/elf"
 	"debug/macho"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -156,16 +159,16 @@ func fetchTag(ctx context.Context, p *catalog.Plugin, version, platform, prefix 
 // libraries alone (a toolchain's library reached through a search
 // path is absent on every other machine).
 func layDown(kind catalog.Kind, name, platform, built, dst string) error {
-	if err := holdExecutable(kind, name, platform, built); err != nil {
+	if err := holdExecutable(kind, name, platform, built, "."); err != nil {
 		return err
 	}
 	return copyFile(built, dst)
 }
 
 // holdExecutable holds an executable to layDown's rule for the
-// platform where it lies, for a kind whose launcher is linked in
-// place.
-func holdExecutable(kind catalog.Kind, name, platform, built string) error {
+// platform where it lies; at is the directory within the tree the
+// executable occupies, slash-separated, the root `.`.
+func holdExecutable(kind catalog.Kind, name, platform, built, at string) error {
 	os, _ := catalog.SplitPlatform(platform)
 	var err error
 	switch os {
@@ -174,12 +177,40 @@ func holdExecutable(kind catalog.Kind, name, platform, built string) error {
 			err = checkStatic(built)
 		}
 	case "darwin":
-		err = checkPortable(built)
+		err = checkPortable(built, at, at)
 	}
 	if err != nil {
 		return fmt.Errorf("%s %s: %w", name, platform, err)
 	}
 	return nil
+}
+
+// holdRuntime holds a runtime's tree to layDown's darwin rule in
+// whole: every Mach-O file under it, the launcher and the libraries
+// it loads, a library's `@executable_path` the launcher's directory
+// launcherAt. A runtime links the C library on linux and is not
+// held there. A file is a Mach-O by its magic, so one the reader
+// cannot parse is refused rather than passed over.
+func holdRuntime(name, platform, tree, launcherAt string) error {
+	if os, _ := catalog.SplitPlatform(platform); os != "darwin" {
+		return nil
+	}
+	return filepath.WalkDir(tree, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || !d.Type().IsRegular() {
+			return err
+		}
+		if is, err := machO(p); err != nil || !is {
+			return err
+		}
+		rel, err := filepath.Rel(tree, p)
+		if err != nil {
+			return err
+		}
+		if err := checkPortable(p, path.Dir(filepath.ToSlash(rel)), launcherAt); err != nil {
+			return fmt.Errorf("%s %s: %s: %w", name, platform, filepath.ToSlash(rel), err)
+		}
+		return nil
+	})
 }
 
 // checkStatic refuses an ELF executable that names an interpreter.
@@ -211,30 +242,27 @@ func checkStatic(path string) error {
 // runtime library bound through `@rpath` with `/usr/lib/swift` among
 // absolute run paths alone would load on a recent macOS, and is
 // refused here all the same; the remedy is a deployment target the
-// system's runtime serves, not a looser rule.
-func checkPortable(path string) error {
-	var files []*macho.File
-	if fat, err := macho.OpenFat(path); err == nil {
-		defer fat.Close()
-		for _, a := range fat.Arches {
-			files = append(files, a.File)
-		}
-	} else {
-		f, err := macho.Open(path)
-		if err != nil {
-			return fmt.Errorf("no Mach-O executable: %w", err)
-		}
-		defer f.Close()
-		files = append(files, f)
+// system's runtime serves, not a looser rule. at is the file's own
+// directory within the tree, launcherAt the directory of the
+// executable whose process loads it, where the file is a library.
+func checkPortable(path, at, launcherAt string) error {
+	files, close, err := openMachO(path)
+	if err != nil {
+		return err
 	}
+	defer close()
 	for _, f := range files {
 		libs, rpaths, err := loadedLibraries(f)
 		if err != nil {
 			return err
 		}
+		execAt := launcherAt
+		if f.Type == macho.TypeExec {
+			execAt = at
+		}
 		relative := false
 		for _, rp := range rpaths {
-			if imageRelative(rp) {
+			if imageRelative(rp, at, execAt) {
 				relative = true
 			} else if !substrate(rp) {
 				return fmt.Errorf("searches %s: a darwin tree's run paths are the system's or relative to the image", rp)
@@ -242,7 +270,7 @@ func checkPortable(path string) error {
 		}
 		for _, lib := range libs {
 			switch {
-			case substrate(lib), imageRelative(lib):
+			case substrate(lib), imageRelative(lib, at, execAt):
 			case strings.HasPrefix(lib, "@rpath/") && relative:
 			default:
 				return fmt.Errorf("loads %s: a darwin tree binds to the system's libraries or its own alone", lib)
@@ -252,11 +280,67 @@ func checkPortable(path string) error {
 	return nil
 }
 
+// machO reports whether a file bears a Mach-O magic: a thin file's
+// in either byte order, or the universal file's followed by its
+// architecture count — a Java class file bears the same magic
+// followed by its version, 45 at the earliest, where a universal
+// file holds a handful of architectures, which is how file(1) tells
+// them apart. A file shorter than the magic and count reads as
+// zeros past its end: no magic, or a universal file of no
+// architectures, which the reader refuses.
+func machO(path string) (bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+	var head [8]byte
+	if _, err := io.ReadFull(f, head[:]); err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return false, err
+	}
+	switch binary.BigEndian.Uint32(head[:4]) {
+	case macho.Magic32, macho.Magic64, 0xcefaedfe, 0xcffaedfe:
+		return true, nil
+	case macho.MagicFat:
+		return binary.BigEndian.Uint32(head[4:]) < 45, nil
+	}
+	return false, nil
+}
+
+// openMachO opens a Mach-O file's architectures, every one of a
+// universal file, with what closes them.
+func openMachO(path string) ([]*macho.File, func(), error) {
+	if fat, err := macho.OpenFat(path); err == nil {
+		var files []*macho.File
+		for _, a := range fat.Arches {
+			files = append(files, a.File)
+		}
+		return files, func() { fat.Close() }, nil
+	}
+	f, err := macho.Open(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("no Mach-O executable: %w", err)
+	}
+	return []*macho.File{f}, func() { f.Close() }, nil
+}
+
 // imageRelative reports whether a binding or run path resolves
-// relative to the image: through the executable's or the loading
-// library's own location.
-func imageRelative(p string) bool {
-	return strings.HasPrefix(p, "@executable_path/") || strings.HasPrefix(p, "@loader_path/")
+// within the image: through the loading file's own location
+// (loaderAt, its directory within the tree) or the process's
+// executable's (execAt), the location itself or a path under it
+// that does not climb past the tree's root, where it would reach
+// the runner's own files and resolve there alone.
+func imageRelative(p, loaderAt, execAt string) bool {
+	for anchor, at := range map[string]string{"@executable_path": execAt, "@loader_path": loaderAt} {
+		if p == anchor {
+			return true
+		}
+		if rest, ok := strings.CutPrefix(p, anchor+"/"); ok {
+			within := path.Clean(path.Join(at, rest))
+			return within != ".." && !strings.HasPrefix(within, "../")
+		}
+	}
+	return false
 }
 
 // substrate reports whether a path lies in the darwin row's

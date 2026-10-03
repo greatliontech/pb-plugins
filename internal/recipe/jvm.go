@@ -27,8 +27,10 @@ import (
 // JDK's modules — the JDK's archive for that platform fetched from
 // Adoptium at the checksum it publishes, its jmods the link's input,
 // the host's jlink of the same release doing the linking — under
-// `jre/`, its launcher held to layDown's rule where it lies (linked
-// under its bare name on every platform, as every entrypoint is),
+// `jre/`, its Mach-O files — the launcher and the libraries it
+// loads — held to layDown's darwin rule where they lie (the launcher
+// linked under its bare name on every platform, as every entrypoint
+// is),
 // and the jar fetched once from Maven Central at its coordinates,
 // verified against the digest Maven publishes beside it, laid down
 // as `<entrypoint>.jar`; the image's argv is the catalog's
@@ -64,7 +66,7 @@ func buildJvm(ctx context.Context, c *catalog.Catalog, name string, p *catalog.P
 				return err
 			}
 		}
-		if err := holdExecutable(p.Kind, name, pl, launcher); err != nil {
+		if err := holdRuntime(name, pl, tree, "jre/bin"); err != nil {
 			return err
 		}
 		if _, err := jar.Seek(0, io.SeekStart); err != nil {

@@ -933,21 +933,21 @@ func TestCheckPortable(t *testing.T) {
 	toolchain := machoLoading(macho.CpuAmd64, "/Library/Developer/Toolchains/swift-6.4.0-RELEASE.xctoolchain/usr/lib/swift/macosx/libswift_Concurrency.dylib")
 	weak := machoLoading(macho.CpuArm64, "/usr/lib/libSystem.B.dylib", "weak:@rpath/libswiftCompatibilitySpan.dylib")
 	weakSystem := machoLoading(macho.CpuArm64, "weak:/usr/lib/swift/libswift_Concurrency.dylib")
-	if err := checkPortable(write("system", system)); err != nil {
+	if err := checkPortable(write("system", system), ".", "."); err != nil {
 		t.Errorf("the system's libraries: %v", err)
 	}
-	if err := checkPortable(write("rpath", rpath)); err == nil || !strings.Contains(err.Error(), "@rpath/libswiftCompatibilitySpan.dylib") {
+	if err := checkPortable(write("rpath", rpath), ".", "."); err == nil || !strings.Contains(err.Error(), "@rpath/libswiftCompatibilitySpan.dylib") {
 		t.Errorf("a search path: %v", err)
 	}
-	if err := checkPortable(write("toolchain", toolchain)); err == nil || !strings.Contains(err.Error(), "/Library/Developer/Toolchains") {
+	if err := checkPortable(write("toolchain", toolchain), ".", "."); err == nil || !strings.Contains(err.Error(), "/Library/Developer/Toolchains") {
 		t.Errorf("a toolchain's library: %v", err)
 	}
 	// A weak binding counts as a binding: a toolchain's compatibility
 	// library is bound so.
-	if err := checkPortable(write("weak", weak)); err == nil || !strings.Contains(err.Error(), "@rpath/libswiftCompatibilitySpan.dylib") {
+	if err := checkPortable(write("weak", weak), ".", "."); err == nil || !strings.Contains(err.Error(), "@rpath/libswiftCompatibilitySpan.dylib") {
 		t.Errorf("a weak search-path binding: %v", err)
 	}
-	if err := checkPortable(write("weak-system", weakSystem)); err != nil {
+	if err := checkPortable(write("weak-system", weakSystem), ".", "."); err != nil {
 		t.Errorf("a weak binding to the system: %v", err)
 	}
 	// A bundled runtime's launcher binds its own libraries relative
@@ -956,38 +956,81 @@ func TestCheckPortable(t *testing.T) {
 	// @rpath binding whose run paths are absolute and foreign, or a
 	// foreign absolute run path itself, is refused.
 	bundled := machoLoading(macho.CpuArm64, "/usr/lib/libSystem.B.dylib", "rpath:@executable_path/../lib", "@rpath/libjli.dylib")
-	if err := checkPortable(write("bundled", bundled)); err != nil {
+	if err := checkPortable(write("bundled", bundled), "jre/bin", "jre/bin"); err != nil {
 		t.Errorf("a runtime bound relative to the image: %v", err)
 	}
 	loader := machoLoading(macho.CpuArm64, "@loader_path/libjvm.dylib")
-	if err := checkPortable(write("loader", loader)); err != nil {
+	if err := checkPortable(write("loader", loader), ".", "."); err != nil {
 		t.Errorf("a loader-relative binding: %v", err)
 	}
+	// A run path that is the loader's own directory, as the swift
+	// toolchain's programs search theirs, names nothing under it.
+	bare := machoLoading(macho.CpuArm64, "rpath:@loader_path", "@rpath/libswiftCore.dylib")
+	if err := checkPortable(write("bare", bare), ".", "."); err != nil {
+		t.Errorf("the loader's own directory as a run path: %v", err)
+	}
+	impostor := machoLoading(macho.CpuArm64, "rpath:@loader_pathological", "/usr/lib/libSystem.B.dylib")
+	if err := checkPortable(write("impostor", impostor), ".", "."); err == nil || !strings.Contains(err.Error(), "searches @loader_pathological") {
+		t.Errorf("a run path spelled like the anchor: %v", err)
+	}
+	// A path under the anchor stays within the tree: a launcher under
+	// jre/bin reaches jre/lib (the bundled case), the entrypoint at
+	// the root reaches nothing above it, where the runner's own files
+	// would resolve.
+	if err := checkPortable(write("bundled-root", bundled), ".", "."); err == nil || !strings.Contains(err.Error(), "searches @executable_path/../lib") {
+		t.Errorf("a run path above the tree's root: %v", err)
+	}
+	parent := machoLoading(macho.CpuArm64, "rpath:@executable_path/..", "/usr/lib/libSystem.B.dylib")
+	if err := checkPortable(write("parent", parent), ".", "."); err == nil || !strings.Contains(err.Error(), "searches @executable_path/..") {
+		t.Errorf("the root's parent as a run path: %v", err)
+	}
+	climbing := machoLoading(macho.CpuArm64, "rpath:@loader_path/../../../opt/homebrew/lib", "@rpath/libfoo.dylib")
+	if err := checkPortable(write("climbing", climbing), "jre/bin", "jre/bin"); err == nil || !strings.Contains(err.Error(), "searches @loader_path/../../../opt/homebrew/lib") {
+		t.Errorf("a run path climbing out of the tree: %v", err)
+	}
+	escapingBinding := machoLoading(macho.CpuArm64, "@loader_path/../libx.dylib")
+	if err := checkPortable(write("escaping-binding", escapingBinding), ".", "."); err == nil || !strings.Contains(err.Error(), "loads @loader_path/../libx.dylib") {
+		t.Errorf("a binding climbing out of the tree: %v", err)
+	}
+	// A library's @executable_path is the launcher's directory, its
+	// @loader_path its own: a runtime's libjvm under jre/lib/server
+	// reaches jre/lib either way, and nothing above the root.
+	dylib := machoLoading(macho.CpuArm64, "@executable_path/../lib/libjli.dylib", "@loader_path/../libjli.dylib")
+	binary.LittleEndian.PutUint32(dylib[12:], uint32(macho.TypeDylib))
+	if err := checkPortable(write("dylib", dylib), "jre/lib/server", "jre/bin"); err != nil {
+		t.Errorf("a library bound beside the launcher's directory: %v", err)
+	}
+	if err := checkPortable(write("dylib-shallow", dylib), "jre/lib/server", "."); err == nil || !strings.Contains(err.Error(), "loads @executable_path/../lib/libjli.dylib") {
+		t.Errorf("a library bound above the launcher's root: %v", err)
+	}
+	if err := checkPortable(write("dylib-root", dylib), ".", "jre/bin"); err == nil || !strings.Contains(err.Error(), "loads @loader_path/../libjli.dylib") {
+		t.Errorf("a library at the root bound above it: %v", err)
+	}
 	foreignRpath := machoLoading(macho.CpuArm64, "rpath:/Library/Developer/Toolchains/x/usr/lib", "@rpath/libswift_Concurrency.dylib")
-	if err := checkPortable(write("foreign-rpath", foreignRpath)); err == nil || !strings.Contains(err.Error(), "searches /Library/Developer/Toolchains") {
+	if err := checkPortable(write("foreign-rpath", foreignRpath), ".", "."); err == nil || !strings.Contains(err.Error(), "searches /Library/Developer/Toolchains") {
 		t.Errorf("a foreign run path: %v", err)
 	}
 	systemRpath := machoLoading(macho.CpuArm64, "rpath:/usr/lib/swift", "@rpath/libswift_Concurrency.dylib")
-	if err := checkPortable(write("system-rpath", systemRpath)); err == nil || !strings.Contains(err.Error(), "@rpath/libswift_Concurrency.dylib") {
+	if err := checkPortable(write("system-rpath", systemRpath), ".", "."); err == nil || !strings.Contains(err.Error(), "@rpath/libswift_Concurrency.dylib") {
 		t.Errorf("an @rpath binding with the system's run path alone: %v", err)
 	}
 	// The substrate is the system's libraries and frameworks, not
 	// everything under /System; a loader environment is refused.
 	volumes := machoLoading(macho.CpuArm64, "rpath:/System/Volumes/Data/x", "/usr/lib/libSystem.B.dylib")
-	if err := checkPortable(write("volumes", volumes)); err == nil || !strings.Contains(err.Error(), "searches /System/Volumes/Data/x") {
+	if err := checkPortable(write("volumes", volumes), ".", "."); err == nil || !strings.Contains(err.Error(), "searches /System/Volumes/Data/x") {
 		t.Errorf("a run path under /System outside the substrate: %v", err)
 	}
 	env := machoOf(macho.CpuArm64)
 	env = append(env, 0x27, 0, 0, 0, 24, 0, 0, 0, 12, 0, 0, 0, 'D', 'Y', 'L', 'D', '_', 'X', '=', '1', 0, 0, 0, 0)
 	binary.LittleEndian.PutUint32(env[16:], 1)
 	binary.LittleEndian.PutUint32(env[20:], 24)
-	if err := checkPortable(write("env", env)); err == nil || !strings.Contains(err.Error(), "sets a loader environment") {
+	if err := checkPortable(write("env", env), ".", "."); err == nil || !strings.Contains(err.Error(), "sets a loader environment") {
 		t.Errorf("a loader environment: %v", err)
 	}
 	// A binding whose name cannot be read is refused, not passed over.
 	malformed := machoLoading(macho.CpuArm64, "weak:/usr/lib/libSystem.B.dylib")
 	binary.LittleEndian.PutUint32(malformed[32+8:], 0xffff) // the name's offset, outside the command
-	if err := checkPortable(write("malformed", malformed)); err == nil || !strings.Contains(err.Error(), "no readable library") {
+	if err := checkPortable(write("malformed", malformed), ".", "."); err == nil || !strings.Contains(err.Error(), "no readable library") {
 		t.Errorf("a malformed binding: %v", err)
 	}
 	// A command too short for a binding's fixed words is refused too.
@@ -995,18 +1038,18 @@ func TestCheckPortable(t *testing.T) {
 	short = append(short, 0x18, 0, 0, 0x80, 8, 0, 0, 0) // LC_LOAD_WEAK_DYLIB, 8 bytes long
 	binary.LittleEndian.PutUint32(short[16:], 1)
 	binary.LittleEndian.PutUint32(short[20:], 8)
-	if err := checkPortable(write("short", short)); err == nil || !strings.Contains(err.Error(), "no readable library") {
+	if err := checkPortable(write("short", short), ".", "."); err == nil || !strings.Contains(err.Error(), "no readable library") {
 		t.Errorf("a binding too short for its words: %v", err)
 	}
 	inHeader := machoLoading(macho.CpuArm64, "weak:/usr/lib/libSystem.B.dylib")
 	binary.LittleEndian.PutUint32(inHeader[32+8:], 8) // the name's offset, inside the fixed words
-	if err := checkPortable(write("in-header", inHeader)); err == nil || !strings.Contains(err.Error(), "no readable library") {
+	if err := checkPortable(write("in-header", inHeader), ".", "."); err == nil || !strings.Contains(err.Error(), "no readable library") {
 		t.Errorf("a binding named inside the command's fixed words: %v", err)
 	}
-	if err := checkPortable(write("fat", fatOfBodies(system, toolchain))); err == nil || !strings.Contains(err.Error(), "/Library/Developer/Toolchains") {
+	if err := checkPortable(write("fat", fatOfBodies(system, toolchain)), ".", "."); err == nil || !strings.Contains(err.Error(), "/Library/Developer/Toolchains") {
 		t.Errorf("a universal executable with one architecture bound to a toolchain: %v", err)
 	}
-	if err := checkPortable(write("none", []byte("x"))); err == nil {
+	if err := checkPortable(write("none", []byte("x")), ".", "."); err == nil {
 		t.Error("no Mach-O passed")
 	}
 }
@@ -1015,6 +1058,88 @@ func TestCheckPortable(t *testing.T) {
 // load elsewhere than the runner: a linux one static where its kind
 // takes no base, a darwin one bound to the system's libraries, a
 // windows one as it is; a refused one is not laid down.
+// A runtime's darwin tree is held in whole: its libraries as its
+// launcher, a library's @executable_path the launcher's directory;
+// what is no Mach-O passes; a linux runtime is not held.
+func TestHoldRuntime(t *testing.T) {
+	lay := func(files map[string][]byte) string {
+		tree := t.TempDir()
+		for name, b := range files {
+			p := filepath.Join(tree, filepath.FromSlash(name))
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(p, b, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return tree
+	}
+	launcher := machoLoading(macho.CpuArm64, "/usr/lib/libSystem.B.dylib", "rpath:@executable_path/../lib", "@rpath/libjli.dylib")
+	jli := machoLoading(macho.CpuArm64, "/usr/lib/libSystem.B.dylib", "@loader_path/server/libjvm.dylib")
+	binary.LittleEndian.PutUint32(jli[12:], uint32(macho.TypeDylib))
+	foreign := machoLoading(macho.CpuArm64, "rpath:/Library/Java/JavaVirtualMachines/lib", "@rpath/libjsig.dylib")
+	binary.LittleEndian.PutUint32(foreign[12:], uint32(macho.TypeDylib))
+	classFile := []byte{0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 65, 0, 0, 0, 0}
+	sound := map[string][]byte{"jre/bin/java": launcher, "jre/lib/libjli.dylib": jli, "jre/lib/modules": []byte("jimage"), "jre/lib/A.class": classFile, "e.jar": []byte("PK")}
+	if err := holdRuntime("a/b", "darwin/arm64", lay(sound), "jre/bin"); err != nil {
+		t.Errorf("a runtime bound within its tree: %v", err)
+	}
+	sound["jre/lib/server/libjvm.dylib"] = foreign
+	if err := holdRuntime("a/b", "darwin/arm64", lay(sound), "jre/bin"); err == nil || !strings.Contains(err.Error(), "a/b darwin/arm64: jre/lib/server/libjvm.dylib: searches /Library/Java") {
+		t.Errorf("a library bound to a foreign run path: %v", err)
+	}
+	if err := holdRuntime("a/b", "linux/arm64", lay(sound), "jre/bin"); err != nil {
+		t.Errorf("a linux runtime: %v", err)
+	}
+	// A file bearing a Mach-O magic the reader cannot parse is
+	// refused, not passed over; a universal file is told from a
+	// class file by the word after the magic.
+	delete(sound, "jre/lib/server/libjvm.dylib")
+	sound["jre/lib/libtorn.dylib"] = append(machoOf(macho.CpuArm64)[:12], 0xff)
+	if err := holdRuntime("a/b", "darwin/arm64", lay(sound), "jre/bin"); err == nil || !strings.Contains(err.Error(), "jre/lib/libtorn.dylib: no Mach-O executable") {
+		t.Errorf("a Mach-O the reader cannot parse: %v", err)
+	}
+	for _, magic := range [][]byte{{0xfe, 0xed, 0xfa, 0xce}, {0xfe, 0xed, 0xfa, 0xcf}, {0xce, 0xfa, 0xed, 0xfe}, {0xcf, 0xfa, 0xed, 0xfe}, {0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 2}} {
+		sound["jre/lib/libtorn.dylib"] = append(magic, 0xff, 0xff, 0xff, 0xff, 0xff)
+		if err := holdRuntime("a/b", "darwin/arm64", lay(sound), "jre/bin"); err == nil || !strings.Contains(err.Error(), "jre/lib/libtorn.dylib: no Mach-O executable") {
+			t.Errorf("a Mach-O magic %x before what the reader cannot parse: %v", magic, err)
+		}
+	}
+	sound["jre/lib/libtorn.dylib"] = []byte{0xca, 0xfe, 0xba, 0xbe}
+	if err := holdRuntime("a/b", "darwin/arm64", lay(sound), "jre/bin"); err == nil || !strings.Contains(err.Error(), "jre/lib/libtorn.dylib: no Mach-O executable") {
+		t.Errorf("a universal magic alone: %v", err)
+	}
+	// The word after the universal magic: 44 is an architecture
+	// count, 45 the earliest class file's version.
+	sound["jre/lib/libtorn.dylib"] = []byte{0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 44}
+	if err := holdRuntime("a/b", "darwin/arm64", lay(sound), "jre/bin"); err == nil || !strings.Contains(err.Error(), "jre/lib/libtorn.dylib: no Mach-O executable") {
+		t.Errorf("a universal file of 44 architectures: %v", err)
+	}
+	sound["jre/lib/libtorn.dylib"] = []byte{0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 45}
+	if err := holdRuntime("a/b", "darwin/arm64", lay(sound), "jre/bin"); err != nil {
+		t.Errorf("the earliest class file: %v", err)
+	}
+	delete(sound, "jre/lib/libtorn.dylib")
+	foreignAmd := machoLoading(macho.CpuAmd64, "rpath:/Library/Java/JavaVirtualMachines/lib", "@rpath/libjsig.dylib")
+	binary.LittleEndian.PutUint32(foreignAmd[12:], uint32(macho.TypeDylib))
+	sound["jre/lib/libfat.dylib"] = fatOfBodies(jli, foreignAmd)
+	if err := holdRuntime("a/b", "darwin/arm64", lay(sound), "jre/bin"); err == nil || !strings.Contains(err.Error(), "jre/lib/libfat.dylib: searches /Library/Java") {
+		t.Errorf("a universal library with one architecture foreign: %v", err)
+	}
+	delete(sound, "jre/lib/libfat.dylib")
+	sound["jre/lib/short"] = []byte{0xcf, 0xfa, 0xed}
+	if err := holdRuntime("a/b", "darwin/arm64", lay(sound), "jre/bin"); err != nil {
+		t.Errorf("a file shorter than a magic: %v", err)
+	}
+	// An executable's @executable_path is its own directory, wherever
+	// the launcher lies: one at the root reaches nothing above it.
+	sound["t"] = machoLoading(macho.CpuArm64, "rpath:@executable_path/../x", "/usr/lib/libSystem.B.dylib")
+	if err := holdRuntime("a/b", "darwin/arm64", lay(sound), "jre/bin"); err == nil || !strings.Contains(err.Error(), "t: searches @executable_path/../x") {
+		t.Errorf("an executable at the root climbing above it: %v", err)
+	}
+}
+
 func TestLayDown(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name string, b []byte) string {
@@ -1036,6 +1161,9 @@ func TestLayDown(t *testing.T) {
 		{"dynamic elf of a kind over the base", catalog.KindBazel, "linux/amd64", elfWithInterp(elf.EM_X86_64), ""},
 		{"system macho", catalog.KindSwift, "darwin/arm64", machoLoading(macho.CpuArm64, "/usr/lib/libSystem.B.dylib"), ""},
 		{"rpath macho", catalog.KindBazel, "darwin/amd64", machoLoading(macho.CpuAmd64, "@rpath/libswift_Concurrency.dylib"), "@rpath/libswift_Concurrency.dylib"},
+		// An entrypoint lies at the tree's root: a run path above its
+		// own directory leaves the tree.
+		{"climbing macho", catalog.KindSwift, "darwin/arm64", machoLoading(macho.CpuArm64, "rpath:@executable_path/../lib", "@rpath/libjli.dylib"), "searches @executable_path/../lib"},
 		{"windows as it is", catalog.KindRust, "windows/amd64", []byte("MZ"), ""},
 	} {
 		dst := filepath.Join(dir, tc.name, "e")
@@ -1383,6 +1511,7 @@ func TestJDKArchives(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer zf.Close()
 	zf.Write(zipped(t, map[string]string{"jdk/jmods/java.base.jmod": "j"}))
 	if err := unzipInto(zf, filepath.Join(dir, "z")); err != nil {
 		t.Fatal(err)
