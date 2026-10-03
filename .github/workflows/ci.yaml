@@ -27,18 +27,22 @@ jobs:
         shell: bash
       - run: go mod tidy -diff
       - run: go vet ./...
+      # The live recipe tests run on the linux and darwin rows, each
+      # building its own platform's trees, so a tree a native kind
+      # would publish is built here first; windows serves no native
+      # kind's recipe.
       - name: Pin the rust toolchain, as the catalog has it
-        if: startsWith(matrix.os, 'ubuntu')
+        if: runner.os != 'Windows'
         uses: ./.github/actions/toolchain
         with:
           kind: rust
       - name: Pin the swift toolchain, as the catalog has it
-        if: startsWith(matrix.os, 'ubuntu')
+        if: runner.os != 'Windows'
         uses: ./.github/actions/toolchain
         with:
           kind: swift
       - run: go run ./cmd/catalog check
       - run: go test ./... -count=1 -timeout 40m
         env:
-          PBPLUGINS_LIVE: ${{ startsWith(matrix.os, 'ubuntu') && '1' || '' }}
+          PBPLUGINS_LIVE: ${{ runner.os != 'Windows' && '1' || '' }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

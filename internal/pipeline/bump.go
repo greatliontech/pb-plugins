@@ -25,7 +25,8 @@ type Discover func(ctx context.Context, p *catalog.Plugin) ([]string, error)
 // upstream has above its highest listed, ascending, and returns them
 // by plugin. Versions below the highest are never backfilled: what
 // the catalog skipped stays skipped, and a version enters by a hand
-// edit alone. A frozen plugin is passed over whole.
+// edit alone. A frozen plugin is passed over whole; one naming a
+// line takes that major's versions alone.
 func Bump(ctx context.Context, c *catalog.Catalog, discover Discover) (map[string][]string, error) {
 	added := map[string][]string{}
 	for _, name := range c.Names() {
@@ -48,6 +49,9 @@ func Bump(ctx context.Context, c *catalog.Catalog, discover Discover) (map[strin
 				continue
 			}
 			if highest != "" && semver.Compare(v, highest) <= 0 {
+				continue
+			}
+			if p.Line != "" && semver.Major(v) != p.Line {
 				continue
 			}
 			seen[v] = true

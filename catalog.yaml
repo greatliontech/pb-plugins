@@ -633,3 +633,62 @@ plugins:
     product: protoc-gen-swift
     entrypoint: protoc-gen-swift
     platforms: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64]
+  # connect-swift: the generator and its mocks, products of one
+  # package; the lockfile it commits holds the build.
+  connectrpc/swift:
+    source: https://github.com/connectrpc/connect-swift
+    kind: swift
+    repository: connectrpc/connect-swift
+    tag: "{version}"
+    product: protoc-gen-connect-swift
+    entrypoint: protoc-gen-connect-swift
+    platforms: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64]
+  connectrpc/swift-mocks:
+    source: https://github.com/connectrpc/connect-swift
+    kind: swift
+    repository: connectrpc/connect-swift
+    tag: "{version}"
+    product: protoc-gen-connect-swift-mocks
+    entrypoint: protoc-gen-connect-swift-mocks
+    platforms: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64]
+  # connect-swift before its move to connectrpc; deprecated upstream,
+  # its last release the one published, built from the moved
+  # repository, which keeps the tag.
+  bufbuild/connect-swift:
+    source: https://github.com/connectrpc/connect-swift
+    kind: swift
+    repository: connectrpc/connect-swift
+    tag: "{version}"
+    product: protoc-gen-connect-swift
+    entrypoint: protoc-gen-connect-swift
+    platforms: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64]
+    frozen: true
+  bufbuild/connect-swift-mocks:
+    source: https://github.com/connectrpc/connect-swift
+    kind: swift
+    repository: connectrpc/connect-swift
+    tag: "{version}"
+    product: protoc-gen-connect-swift-mocks
+    entrypoint: protoc-gen-connect-swift-mocks
+    platforms: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64]
+    frozen: true
+  # grpc-swift's 1.x line carries protoc-gen-grpc-swift; its 2.x
+  # releases in the same repository do not, the generator having
+  # moved to grpc-swift-protobuf (grpc/swift-protobuf below).
+  grpc/swift:
+    source: https://github.com/grpc/grpc-swift
+    kind: swift
+    repository: grpc/grpc-swift
+    tag: "{version}"
+    product: protoc-gen-grpc-swift
+    entrypoint: protoc-gen-grpc-swift
+    platforms: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64]
+    line: v1
+  grpc/swift-protobuf:
+    source: https://github.com/grpc/grpc-swift-protobuf
+    kind: swift
+    repository: grpc/grpc-swift-protobuf
+    tag: "{version}"
+    product: protoc-gen-grpc-swift-2
+    entrypoint: protoc-gen-grpc-swift-2
+    platforms: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64]

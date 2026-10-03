@@ -358,6 +358,41 @@ func TestBump(t *testing.T) {
 	}
 }
 
+// A plugin naming a line takes the line's versions from the bump
+// alone: another major upstream releases beside it is passed over.
+func TestBumpLine(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "plugins", "a", "b"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile("../../catalog.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	header := string(raw[:strings.Index(string(raw), "plugins:")])
+	if err := os.WriteFile(filepath.Join(dir, "catalog.yaml"), []byte(header+"plugins:\n  a/b:\n    source: s\n    kind: swift\n    repository: o/r\n    tag: \"{version}\"\n    product: e\n    entrypoint: e\n    platforms: [linux/amd64]\n    line: v1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "plugins", "a", "b", "versions"), []byte("v1.27.6\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := catalog.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := []string{"v2.2.3", "v1.27.7", "v2.0.0", "v1.28.0"}
+	added, err := Bump(context.Background(), c, func(context.Context, *catalog.Plugin) ([]string, error) { return found, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(added["a/b"], " "); got != "v1.27.7 v1.28.0" {
+		t.Errorf("added %q", got)
+	}
+	if _, err := catalog.Load(dir); err != nil {
+		t.Errorf("the bumped catalog does not load: %v", err)
+	}
+}
+
 // A tag reads as a version through its template's prefix and suffix,
 // two-component versions included; another shape is none.
 func TestTagVersion(t *testing.T) {

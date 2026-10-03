@@ -886,26 +886,6 @@ func TestBuildSwiftRefusesDynamic(t *testing.T) {
 	}
 }
 
-// The swift kind builds apple/swift's product on this host and lays
-// its executable down (network: GitHub; swift, with the static Linux
-// SDK installed on linux). Runs where PBPLUGINS_LIVE is set.
-func TestSwiftKindLive(t *testing.T) {
-	if os.Getenv("PBPLUGINS_LIVE") == "" {
-		t.Skip("PBPLUGINS_LIVE unset")
-	}
-	c, err := catalog.Load("../..")
-	if err != nil {
-		t.Fatal(err)
-	}
-	out := t.TempDir()
-	if err := Build(context.Background(), c, "apple/swift", "v1.38.1", []string{Host()}, out); err != nil {
-		t.Fatal(err)
-	}
-	if fi, err := os.Stat(filepath.Join(TreeDir(out, Host()), "protoc-gen-swift")); err != nil || fi.Size() == 0 {
-		t.Errorf("the tree: %v", err)
-	}
-}
-
 // fakeSwift puts a swift on the PATH that records every call and,
 // asked where the products lie, answers with the release directory,
 // where a build lays exe down under the product's name; the log's
@@ -1020,6 +1000,42 @@ func TestLayDown(t *testing.T) {
 		case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), "a/b "+tc.platform) || laid == nil):
 			t.Errorf("%s: %v, laid down: %v", tc.name, err, laid == nil)
 		}
+	}
+}
+
+// The swift kind builds every swift plugin on this host at the
+// versions its catalog file holds, bufbuild's from the moved
+// repository (network: GitHub, the packages' dependencies; swift,
+// with the static Linux SDK installed on linux). Runs where
+// PBPLUGINS_LIVE is set.
+func TestSwiftPluginsLive(t *testing.T) {
+	if os.Getenv("PBPLUGINS_LIVE") == "" {
+		t.Skip("PBPLUGINS_LIVE unset")
+	}
+	c, err := catalog.Load("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	built := 0
+	for _, name := range c.Names() {
+		p := c.Plugins[name]
+		if p.Kind != catalog.KindSwift {
+			continue
+		}
+		for _, version := range p.Versions {
+			out := t.TempDir()
+			if err := Build(context.Background(), c, name, version, []string{Host()}, out); err != nil {
+				t.Errorf("%s %s: %v", name, version, err)
+				continue
+			}
+			if fi, err := os.Stat(filepath.Join(TreeDir(out, Host()), p.Entrypoint)); err != nil || fi.Size() == 0 {
+				t.Errorf("%s %s: the tree: %v", name, version, err)
+			}
+			built++
+		}
+	}
+	if built < 7 {
+		t.Errorf("%d swift plugin versions built, the catalog holding seven at least", built)
 	}
 }
 
