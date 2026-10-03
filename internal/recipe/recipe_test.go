@@ -370,9 +370,17 @@ func TestBuildReleaseMembers(t *testing.T) {
 func TestExtractTarInto(t *testing.T) {
 	archive := tarGz(t, map[string]string{"root-1.0/": "", "root-1.0/BUILD": "b", "root-1.0/src/": "", "root-1.0/src/bin/x": "x"}, map[string]string{"root-1.0/src/link": "bin/x"})
 	escaping := tarGz(t, map[string]string{"root-1.0/a": "a"}, map[string]string{"root-1.0/link": "../../etc/passwd"})
+	throttled := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/ok.tar.gz":
+			// Refused for the moment once, as the shared runners are.
+			if throttled == 0 {
+				throttled++
+				w.Header().Set("Retry-After", "0")
+				w.WriteHeader(http.StatusTooManyRequests)
+				return
+			}
 			w.Write(archive)
 		case "/escape.tar.gz":
 			w.Write(escaping)

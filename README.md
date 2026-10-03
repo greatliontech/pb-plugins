@@ -152,6 +152,15 @@ refused rather than published to load on the runner alone.
   tests, the live recipe tests included on every row, each building
   its own platform's trees.
 
+Every fetch the tool makes (an upstream's archive, its metadata, a
+published checksum) is repeated where upstream refuses it for the
+moment — 429, or a 5xx — up to five times, after the wait the server
+names where it names one within a minute (a longer ask is final),
+else doubling from a second; any other refusal, and a request that
+gets no answer at all, is final at once, so a throttled runner
+builds and publishes what a later request answers and a missing
+asset is reported as missing.
+
 ## Trust
 
 Every list and image is signed by the `publish` workflow's identity.

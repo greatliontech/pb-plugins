@@ -3,13 +3,13 @@ package recipe
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 
 	"github.com/greatliontech/pb-plugins/internal/catalog"
+	"github.com/greatliontech/pb-plugins/internal/web"
 )
 
 // buildBazel fetches the source archive, extracts it with the
@@ -88,17 +88,10 @@ func bazelArgs(p *catalog.Plugin, goos string) []string {
 // dir with its leading path components stripped (untar).
 func extractTarInto(ctx context.Context, url string, strip int, dir string) error {
 	fmt.Fprintf(os.Stderr, "+ fetch %s\n", url)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	body, err := web.Open(ctx, url, nil)
 	if err != nil {
 		return err
 	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("%s: %s", url, resp.Status)
-	}
-	return untar(resp.Body, strip, dir)
+	defer body.Close()
+	return untar(body, strip, dir)
 }
