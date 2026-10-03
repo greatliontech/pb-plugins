@@ -216,14 +216,22 @@ func holdExecutable(kind catalog.Kind, name, platform, built, at string) error {
 // holdRuntime holds a runtime's tree to layDown's darwin rule in
 // whole: every Mach-O file under it, the launcher and the libraries
 // it loads, a library's `@executable_path` the launcher's directory
-// launcherAt. A runtime links the C library on linux and is not
-// held there. A file is a Mach-O by its magic, so one the reader
-// cannot parse is refused rather than passed over.
+// launcherAt. dyld resolves a library's `@rpath` binding through
+// the run paths of every image on the chain that loaded it, up to
+// the launcher, so the tree is read first and each file held
+// knowing whether any file of it binds through `@rpath`: where one
+// does, a run path elsewhere is live in every file. A runtime links
+// the C library on linux and is not held there. A file is a Mach-O
+// by its magic, so one the reader cannot parse is refused rather
+// than passed over.
 func holdRuntime(name, platform, tree, launcherAt string) error {
 	if os, _ := catalog.SplitPlatform(platform); os != "darwin" {
 		return nil
 	}
-	return filepath.WalkDir(tree, func(p string, d fs.DirEntry, err error) error {
+	var files []string
+	read := map[string][]machoImage{}
+	chainBinds := false
+	err := filepath.WalkDir(tree, func(p string, d fs.DirEntry, err error) error {
 		if err != nil || !d.Type().IsRegular() {
 			return err
 		}
@@ -234,11 +242,64 @@ func holdRuntime(name, platform, tree, launcherAt string) error {
 		if err != nil {
 			return err
 		}
-		if err := checkPortable(p, path.Dir(filepath.ToSlash(rel)), launcherAt); err != nil {
+		images, err := readMachO(p)
+		if err != nil {
 			return fmt.Errorf("%s %s: %s: %w", name, platform, filepath.ToSlash(rel), err)
 		}
+		for _, img := range images {
+			chainBinds = chainBinds || img.bindsThroughRpath()
+		}
+		files = append(files, filepath.ToSlash(rel))
+		read[filepath.ToSlash(rel)] = images
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	for _, rel := range files {
+		if err := holdPortable(read[rel], path.Dir(rel), launcherAt, chainBinds); err != nil {
+			return fmt.Errorf("%s %s: %s: %w", name, platform, rel, err)
+		}
+	}
+	return nil
+}
+
+// machoImage is one architecture of a Mach-O file as the portability
+// rule reads it: the libraries its load commands bind and the run
+// paths it records, and whether it is an executable.
+type machoImage struct {
+	libs, rpaths []string
+	exec         bool
+}
+
+// bindsThroughRpath reports whether a load command names a library
+// through `@rpath`.
+func (img machoImage) bindsThroughRpath() bool {
+	for _, lib := range img.libs {
+		if strings.HasPrefix(lib, "@rpath/") {
+			return true
+		}
+	}
+	return false
+}
+
+// readMachO reads a Mach-O file's architectures, every one of a
+// universal file, as the portability rule needs them.
+func readMachO(path string) ([]machoImage, error) {
+	files, close, err := openMachO(path)
+	if err != nil {
+		return nil, err
+	}
+	defer close()
+	var images []machoImage
+	for _, f := range files {
+		libs, rpaths, err := loadedLibraries(f)
+		if err != nil {
+			return nil, err
+		}
+		images = append(images, machoImage{libs: libs, rpaths: rpaths, exec: f.Type == macho.TypeExec})
+	}
+	return images, nil
 }
 
 // checkStatic refuses an ELF executable that names an interpreter.
@@ -264,9 +325,15 @@ func checkStatic(path string) error {
 // runtime's launcher uses for its own libraries — as the darwin
 // sandbox row admits: a library named through `@rpath` with no
 // image-relative run path, or an absolute path into a toolchain,
-// loads on the machine that built it alone. Every load command
-// naming a library counts — the weak ones too, which is how a
-// toolchain's compatibility library is bound. A back-deployed
+// loads on the machine that built it alone. A run path binds
+// nothing by itself: one elsewhere than the image or the system (a
+// toolchain's, which the swift linker records, or one climbing past
+// the tree's root, which dart's runtime carries) is inert where no
+// load command of the file names a library through `@rpath`, and
+// refused where one does, since dyld would search it (a runtime's
+// tree is held as the loading chain it is, by holdRuntime). Every load
+// command naming a library counts — the weak ones too, which is how
+// a toolchain's compatibility library is bound. A back-deployed
 // runtime library bound through `@rpath` with `/usr/lib/swift` among
 // absolute run paths alone would load on a recent macOS, and is
 // refused here all the same; the remedy is a deployment target the
@@ -274,31 +341,40 @@ func checkStatic(path string) error {
 // directory within the tree, launcherAt the directory of the
 // executable whose process loads it, where the file is a library.
 func checkPortable(path, at, launcherAt string) error {
-	files, close, err := openMachO(path)
+	images, err := readMachO(path)
 	if err != nil {
 		return err
 	}
-	defer close()
-	for _, f := range files {
-		libs, rpaths, err := loadedLibraries(f)
-		if err != nil {
-			return err
-		}
+	return holdPortable(images, at, launcherAt, false)
+}
+
+// holdPortable holds a file's images to checkPortable's rule;
+// chainBinds says that some file of the tree, this one or another,
+// binds a library through `@rpath`, which makes a run path
+// elsewhere live here.
+func holdPortable(images []machoImage, at, launcherAt string, chainBinds bool) error {
+	for _, img := range images {
 		execAt := launcherAt
-		if f.Type == macho.TypeExec {
+		if img.exec {
 			execAt = at
 		}
-		relative := false
-		for _, rp := range rpaths {
-			if imageRelative(rp, at, execAt) {
+		relative, elsewhere := false, ""
+		for _, rp := range img.rpaths {
+			switch {
+			case imageRelative(rp, at, execAt):
 				relative = true
-			} else if !substrate(rp) {
-				return fmt.Errorf("searches %s: a darwin tree's run paths are the system's or relative to the image", rp)
+			case !substrate(rp) && elsewhere == "":
+				elsewhere = rp
 			}
 		}
-		for _, lib := range libs {
+		if chainBinds && elsewhere != "" && !img.bindsThroughRpath() {
+			return fmt.Errorf("searches %s, which the tree's libraries bind through: a darwin tree's run paths are the system's or relative to the image", elsewhere)
+		}
+		for _, lib := range img.libs {
 			switch {
 			case substrate(lib), imageRelative(lib, at, execAt):
+			case strings.HasPrefix(lib, "@rpath/") && elsewhere != "":
+				return fmt.Errorf("loads %s, searches %s: a darwin tree's run paths are the system's or relative to the image", lib, elsewhere)
 			case strings.HasPrefix(lib, "@rpath/") && relative:
 			default:
 				return fmt.Errorf("loads %s: a darwin tree binds to the system's libraries or its own alone", lib)

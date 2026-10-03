@@ -977,7 +977,7 @@ func TestCheckPortable(t *testing.T) {
 	if err := checkPortable(write("bare", bare), ".", "."); err != nil {
 		t.Errorf("the loader's own directory as a run path: %v", err)
 	}
-	impostor := machoLoading(macho.CpuArm64, "rpath:@loader_pathological", "/usr/lib/libSystem.B.dylib")
+	impostor := machoLoading(macho.CpuArm64, "rpath:@loader_pathological", "@rpath/libx.dylib")
 	if err := checkPortable(write("impostor", impostor), ".", "."); err == nil || !strings.Contains(err.Error(), "searches @loader_pathological") {
 		t.Errorf("a run path spelled like the anchor: %v", err)
 	}
@@ -988,7 +988,7 @@ func TestCheckPortable(t *testing.T) {
 	if err := checkPortable(write("bundled-root", bundled), ".", "."); err == nil || !strings.Contains(err.Error(), "searches @executable_path/../lib") {
 		t.Errorf("a run path above the tree's root: %v", err)
 	}
-	parent := machoLoading(macho.CpuArm64, "rpath:@executable_path/..", "/usr/lib/libSystem.B.dylib")
+	parent := machoLoading(macho.CpuArm64, "rpath:@executable_path/..", "@rpath/libx.dylib")
 	if err := checkPortable(write("parent", parent), ".", "."); err == nil || !strings.Contains(err.Error(), "searches @executable_path/..") {
 		t.Errorf("the root's parent as a run path: %v", err)
 	}
@@ -1018,13 +1018,32 @@ func TestCheckPortable(t *testing.T) {
 	if err := checkPortable(write("foreign-rpath", foreignRpath), ".", "."); err == nil || !strings.Contains(err.Error(), "searches /Library/Developer/Toolchains") {
 		t.Errorf("a foreign run path: %v", err)
 	}
+	// A run path binds nothing by itself: a toolchain's, or one
+	// climbing past the root, is inert in an executable bound to the
+	// system alone (the swift and dart toolchains record such), and
+	// refuses an @rpath binding beside an image-relative run path,
+	// which dyld would search after it.
+	inert := machoLoading(macho.CpuArm64, "rpath:/Users/x/Library/Developer/Toolchains/swift.xctoolchain/usr/lib/swift-6.2/macosx", "rpath:@loader_path/../../..", "/usr/lib/libSystem.B.dylib", "/usr/lib/swift/libswiftCore.dylib")
+	if err := checkPortable(write("inert", inert), ".", "."); err != nil {
+		t.Errorf("run paths elsewhere with no binding through them: %v", err)
+	}
+	ordered := machoLoading(macho.CpuArm64, "rpath:@loader_path", "rpath:/Users/x/Library/Developer/Toolchains/swift.xctoolchain/usr/lib", "@rpath/libswiftCore.dylib")
+	if err := checkPortable(write("ordered", ordered), ".", "."); err == nil || !strings.Contains(err.Error(), "loads @rpath/libswiftCore.dylib, searches /Users/x/Library/Developer/Toolchains") {
+		t.Errorf("an @rpath binding beside a run path elsewhere: %v", err)
+	}
+	// The system's run path beside an image-relative one is searched
+	// after the image: admitted, as the system's libraries are.
+	imageThenSystem := machoLoading(macho.CpuArm64, "rpath:@loader_path", "rpath:/usr/lib/swift", "@rpath/libswift_Concurrency.dylib")
+	if err := checkPortable(write("image-then-system", imageThenSystem), ".", "."); err != nil {
+		t.Errorf("the system's run path beside the image's: %v", err)
+	}
 	systemRpath := machoLoading(macho.CpuArm64, "rpath:/usr/lib/swift", "@rpath/libswift_Concurrency.dylib")
 	if err := checkPortable(write("system-rpath", systemRpath), ".", "."); err == nil || !strings.Contains(err.Error(), "@rpath/libswift_Concurrency.dylib") {
 		t.Errorf("an @rpath binding with the system's run path alone: %v", err)
 	}
 	// The substrate is the system's libraries and frameworks, not
 	// everything under /System; a loader environment is refused.
-	volumes := machoLoading(macho.CpuArm64, "rpath:/System/Volumes/Data/x", "/usr/lib/libSystem.B.dylib")
+	volumes := machoLoading(macho.CpuArm64, "rpath:/System/Volumes/Data/x", "@rpath/libx.dylib")
 	if err := checkPortable(write("volumes", volumes), ".", "."); err == nil || !strings.Contains(err.Error(), "searches /System/Volumes/Data/x") {
 		t.Errorf("a run path under /System outside the substrate: %v", err)
 	}
@@ -1094,16 +1113,31 @@ func TestHoldRuntime(t *testing.T) {
 		t.Errorf("a runtime bound within its tree: %v", err)
 	}
 	sound["jre/lib/server/libjvm.dylib"] = foreign
-	if err := holdRuntime("a/b", "darwin/arm64", lay(sound), "jre/bin"); err == nil || !strings.Contains(err.Error(), "a/b darwin/arm64: jre/lib/server/libjvm.dylib: searches /Library/Java") {
+	if err := holdRuntime("a/b", "darwin/arm64", lay(sound), "jre/bin"); err == nil || !strings.Contains(err.Error(), "a/b darwin/arm64: jre/lib/server/libjvm.dylib: loads @rpath/libjsig.dylib, searches /Library/Java") {
 		t.Errorf("a library bound to a foreign run path: %v", err)
 	}
 	if err := holdRuntime("a/b", "linux/arm64", lay(sound), "jre/bin"); err != nil {
 		t.Errorf("a linux runtime: %v", err)
 	}
+	// A launcher's run path elsewhere is live where a library of the
+	// tree binds through @rpath, dyld searching the chain's run paths
+	// after the library's own; inert where none does.
+	delete(sound, "jre/lib/server/libjvm.dylib")
+	sound["jre/bin/java"] = machoLoading(macho.CpuArm64, "rpath:/Library/Java/JavaVirtualMachines/lib", "/usr/lib/libSystem.B.dylib", "@executable_path/../lib/libjli.dylib")
+	chained := machoLoading(macho.CpuArm64, "rpath:@loader_path", "@rpath/libjsig.dylib")
+	binary.LittleEndian.PutUint32(chained[12:], uint32(macho.TypeDylib))
+	sound["jre/lib/libjli.dylib"] = chained
+	if err := holdRuntime("a/b", "darwin/arm64", lay(sound), "jre/bin"); err == nil || !strings.Contains(err.Error(), "jre/bin/java: searches /Library/Java/JavaVirtualMachines/lib, which the tree's libraries bind through") {
+		t.Errorf("a launcher's run path elsewhere on a chain binding through @rpath: %v", err)
+	}
+	sound["jre/lib/libjli.dylib"] = jli
+	if err := holdRuntime("a/b", "darwin/arm64", lay(sound), "jre/bin"); err != nil {
+		t.Errorf("a launcher's run path elsewhere on a chain binding nothing through @rpath: %v", err)
+	}
+	sound["jre/bin/java"] = launcher
 	// A file bearing a Mach-O magic the reader cannot parse is
 	// refused, not passed over; a universal file is told from a
 	// class file by the word after the magic.
-	delete(sound, "jre/lib/server/libjvm.dylib")
 	sound["jre/lib/libtorn.dylib"] = append(machoOf(macho.CpuArm64)[:12], 0xff)
 	if err := holdRuntime("a/b", "darwin/arm64", lay(sound), "jre/bin"); err == nil || !strings.Contains(err.Error(), "jre/lib/libtorn.dylib: no Mach-O executable") {
 		t.Errorf("a Mach-O the reader cannot parse: %v", err)
@@ -1132,7 +1166,7 @@ func TestHoldRuntime(t *testing.T) {
 	foreignAmd := machoLoading(macho.CpuAmd64, "rpath:/Library/Java/JavaVirtualMachines/lib", "@rpath/libjsig.dylib")
 	binary.LittleEndian.PutUint32(foreignAmd[12:], uint32(macho.TypeDylib))
 	sound["jre/lib/libfat.dylib"] = fatOfBodies(jli, foreignAmd)
-	if err := holdRuntime("a/b", "darwin/arm64", lay(sound), "jre/bin"); err == nil || !strings.Contains(err.Error(), "jre/lib/libfat.dylib: searches /Library/Java") {
+	if err := holdRuntime("a/b", "darwin/arm64", lay(sound), "jre/bin"); err == nil || !strings.Contains(err.Error(), "jre/lib/libfat.dylib: loads @rpath/libjsig.dylib, searches /Library/Java") {
 		t.Errorf("a universal library with one architecture foreign: %v", err)
 	}
 	delete(sound, "jre/lib/libfat.dylib")
@@ -1142,8 +1176,8 @@ func TestHoldRuntime(t *testing.T) {
 	}
 	// An executable's @executable_path is its own directory, wherever
 	// the launcher lies: one at the root reaches nothing above it.
-	sound["t"] = machoLoading(macho.CpuArm64, "rpath:@executable_path/../x", "/usr/lib/libSystem.B.dylib")
-	if err := holdRuntime("a/b", "darwin/arm64", lay(sound), "jre/bin"); err == nil || !strings.Contains(err.Error(), "t: searches @executable_path/../x") {
+	sound["t"] = machoLoading(macho.CpuArm64, "rpath:@executable_path/../x", "@rpath/libx.dylib")
+	if err := holdRuntime("a/b", "darwin/arm64", lay(sound), "jre/bin"); err == nil || !strings.Contains(err.Error(), "t: loads @rpath/libx.dylib, searches @executable_path/../x") {
 		t.Errorf("an executable at the root climbing above it: %v", err)
 	}
 }
@@ -1390,12 +1424,19 @@ func TestBuildJvm(t *testing.T) {
 	// libraries, as a runtime's is).
 	// Temurin's launcher as it is bound: libjli through @rpath with
 	// loader-relative run paths, the system's frameworks and libSystem.
+	// On a darwin host the darwin output is the host's, which the
+	// probe runs: the fake plugin serves there, the fixture only
+	// where the darwin tree is built across.
 	darwinLauncher := filepath.Join(bin, "java-darwin")
 	if err := os.WriteFile(darwinLauncher, machoLoading(macho.CpuArm64, "@rpath/libjli.dylib", "/System/Library/Frameworks/Cocoa.framework/Versions/A/Cocoa", "/System/Library/Frameworks/Security.framework/Versions/A/Security", "/usr/lib/libSystem.B.dylib", "rpath:@loader_path/.", "rpath:@loader_path/../lib"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	// A windows runtime's launcher comes out of jlink as java.exe.
-	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + log + "\nwhile [ $# -gt 0 ]; do if [ \"$1\" = --output ]; then out=$2; fi; shift; done\nmkdir -p \"$out/bin\" \"$out/lib\"\ncase \"$out\" in *darwin-*) cp " + darwinLauncher + " \"$out/bin/java\";; *windows-*) cp " + exe + " \"$out/bin/java.exe\";; *) cp " + exe + " \"$out/bin/java\";; esac\nprintf x > \"$out/lib/jspawnhelper\"\n"
+	darwinOutput := darwinLauncher
+	if runtime.GOOS == "darwin" {
+		darwinOutput = exe
+	}
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + log + "\nwhile [ $# -gt 0 ]; do if [ \"$1\" = --output ]; then out=$2; fi; shift; done\nmkdir -p \"$out/bin\" \"$out/lib\"\ncase \"$out\" in *darwin-*) cp " + darwinOutput + " \"$out/bin/java\";; *windows-*) cp " + exe + " \"$out/bin/java.exe\";; *) cp " + exe + " \"$out/bin/java\";; esac\nprintf x > \"$out/lib/jspawnhelper\"\n"
 	if err := os.WriteFile(filepath.Join(bin, "jlink"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
