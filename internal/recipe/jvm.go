@@ -5,8 +5,6 @@ import (
 	"archive/zip"
 	"compress/gzip"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -206,26 +204,12 @@ func fetchJmods(ctx context.Context, release, platform string) (string, error) {
 // fetchJDK fetches the archive at link, holds it to the checksum and
 // extracts it into dir.
 func fetchJDK(ctx context.Context, link, checksum, dir string) error {
-	fmt.Fprintf(os.Stderr, "+ fetch %s\n", link)
-	tmp, _, err := download(ctx, link)
+	tmp, _, err := downloadHeld(ctx, link, checksum, "Adoptium")
 	if err != nil {
 		return err
 	}
 	defer os.Remove(tmp.Name())
 	defer tmp.Close()
-	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
-		return err
-	}
-	h := sha256.New()
-	if _, err := io.Copy(h, tmp); err != nil {
-		return err
-	}
-	if got := hex.EncodeToString(h.Sum(nil)); !strings.EqualFold(got, checksum) {
-		return fmt.Errorf("%s: sha256 %s, Adoptium publishes %s", link, got, checksum)
-	}
-	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
-		return err
-	}
 	if strings.HasSuffix(link, ".zip") {
 		err = unzipInto(tmp, dir)
 	} else {

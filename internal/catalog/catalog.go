@@ -118,6 +118,14 @@ type Plugin struct {
 	// Main is the Dart script a dart recipe compiles, relative to
 	// the package's directory (Dir) in the repository.
 	Main string `yaml:"main"`
+	// Runtime says a node recipe's package runs under node's own
+	// runtime with its files on disk — a package needing them, or a
+	// native addon — rather than compiled by bun into one
+	// executable: node's binary for every platform is bundled and
+	// Script, the executable's path within the package as its `bin`
+	// names it, is what the runtime runs.
+	Runtime bool   `yaml:"runtime"`
+	Script  string `yaml:"script"`
 	// Classifier and Extension name a jvm recipe's jar among the
 	// artifact's files at a version: `<artifact>-<version>[-<classifier>].<extension>`,
 	// the extension `jar` where unnamed (ScalaPB publishes its
@@ -287,7 +295,7 @@ var (
 // foreign-field refusal reads, so a new kind or field is named once.
 var owned = map[Kind]map[string]bool{
 	KindGo:      fields("platforms", "module", "dir", "package", "tags", "repository", "tag"),
-	KindNode:    fields("platforms", "package"),
+	KindNode:    fields("platforms", "package", "runtime", "script"),
 	KindRelease: fields("repository", "tag", "assets", "member", "members", "maven", "npm", "checksum"),
 	KindBazel:   fields("platforms", "repository", "tag", "archive", "strip", "files", "target", "output", "options"),
 	KindRust:    fields("platforms", "crate", "bin"),
@@ -306,6 +314,10 @@ var JvmModules = []string{"java.base", "java.compiler", "java.instrument", "java
 // kind exists.
 var pinned = map[Kind]bool{KindRust: true, KindSwift: true, KindDart: true, KindJvm: true}
 
+// nodePinnable says the node kind's pin is the runtime bundled by a
+// recipe running under it; a recipe compiled by bun needs none.
+var nodePinnable = map[Kind]bool{KindNode: true}
+
 // toolchainREs are the shapes a kind's pin takes: a release number
 // for rust, swift and dart; Temurin's release name for the jvm
 // kind's JDK (`21.0.12.1+1`, the build number after the plus), the
@@ -314,6 +326,7 @@ var toolchainREs = map[Kind]*regexp.Regexp{
 	KindRust:  toolchainRE,
 	KindSwift: toolchainRE,
 	KindDart:  toolchainRE,
+	KindNode:  toolchainRE,
 	KindJvm:   regexp.MustCompile(`^[0-9]+(\.[0-9]+)*\+[0-9]+$`),
 }
 
@@ -416,7 +429,7 @@ func (c *Catalog) Validate() error {
 		errs = append(errs, errors.New("no plugins"))
 	}
 	for kind, v := range c.Toolchains {
-		if !pinned[Kind(kind)] {
+		if !pinned[Kind(kind)] && !nodePinnable[Kind(kind)] {
 			errs = append(errs, fmt.Errorf("toolchains: %q names no kind the pipeline pins a toolchain for", kind))
 		}
 		if re := toolchainREs[Kind(kind)]; re != nil && !re.MatchString(v) {
@@ -438,6 +451,12 @@ func (c *Catalog) Validate() error {
 	for kind := range pinned {
 		if kinds[kind] && c.Toolchains[string(kind)] == "" {
 			errs = append(errs, fmt.Errorf("toolchains: a %s recipe needs the %s toolchain pinned", kind, kind))
+		}
+	}
+	for _, p := range c.Plugins {
+		if p.Kind == KindNode && p.Runtime && c.Toolchains[string(KindNode)] == "" {
+			errs = append(errs, errors.New("toolchains: a node recipe running under node's runtime needs the node toolchain pinned"))
+			break
 		}
 	}
 	for kind := range sdkPinned {
@@ -483,6 +502,12 @@ func (c *Catalog) Validate() error {
 		case KindNode:
 			if p.Package == "" {
 				fail(name, "node: package required")
+			}
+			if p.Runtime != (p.Script != "") {
+				fail(name, "node: runtime and script go together")
+			}
+			if p.Script != "" && (!fs.ValidPath(p.Script) || strings.ContainsAny(p.Script, "\\:")) {
+				fail(name, "node: script %q is no relative path", p.Script)
 			}
 		case KindRelease:
 			if len(p.Assets) == 0 {
@@ -703,7 +728,8 @@ func (k Kind) NeedsBase() bool { return k != KindGo && k != KindRust && k != Kin
 
 // Argv is the plugin process the image declares, as the build takes
 // it: every kind's one executable at the tree's root, the jvm
-// kind's the runtime's java over the jar — the program an absolute
+// kind's the runtime's java over the jar, a runtime node recipe's
+// node over the package's script under `app/` — the program an absolute
 // path in the tree, which every runner resolves there, the jar
 // relative to the working directory, the tree's root, since an OS
 // row hands the arguments to the plugin as spelled — one argv for
@@ -711,6 +737,9 @@ func (k Kind) NeedsBase() bool { return k != KindGo && k != KindRust && k != Kin
 // laid down under its bare name on every platform, as every
 // entrypoint is, the build marking the program executable).
 func (p *Plugin) Argv() []string {
+	if p.Kind == KindNode && p.Runtime {
+		return []string{"/node", "app/node_modules/" + p.Package + "/" + p.Script}
+	}
 	if p.Kind == KindJvm {
 		// Processes are started by fork and exec, not through the
 		// runtime's spawn helper: the build marks one set of files

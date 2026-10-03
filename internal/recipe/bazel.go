@@ -44,7 +44,7 @@ func buildBazel(ctx context.Context, c *catalog.Catalog, name string, p *catalog
 	}
 	if p.Files != "" {
 		from := filepath.Join(c.Dir, "plugins", filepath.FromSlash(name), "files")
-		if err := copyTree(from, filepath.Join(src, p.Files)); err != nil {
+		if err := copyTree(from, filepath.Join(src, p.Files), irregularRefused); err != nil {
 			return err
 		}
 	}
@@ -101,22 +101,4 @@ func extractTarInto(ctx context.Context, url string, strip int, dir string) erro
 		return fmt.Errorf("%s: %s", url, resp.Status)
 	}
 	return untar(resp.Body, strip, dir)
-}
-
-// copyTree copies the regular files under from to the same paths
-// under to.
-func copyTree(from, to string) error {
-	return filepath.WalkDir(from, func(p string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, _ := filepath.Rel(from, p)
-		if d.IsDir() {
-			return os.MkdirAll(filepath.Join(to, rel), 0o755)
-		}
-		if !d.Type().IsRegular() {
-			return fmt.Errorf("%s: not a regular file", p)
-		}
-		return copyFile(p, filepath.Join(to, rel))
-	})
 }

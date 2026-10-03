@@ -42,7 +42,7 @@ func write(t *testing.T, dir, catalogYAML string, versions map[string]string) {
 	}
 }
 
-var head = "registry: r.example/p\nbase: r.example/base@sha256:" + "ab" + "\ntoolchains:\n  rust: 1.98.1\n  swift: 6.4.0\n  dart: 3.13.5\n  jvm: 21.0.12.1+1\nsdks:\n  swift: " + strings.Repeat("ab", 32) + "\nplugins:\n"
+var head = "registry: r.example/p\nbase: r.example/base@sha256:" + "ab" + "\ntoolchains:\n  rust: 1.98.1\n  swift: 6.4.0\n  dart: 3.13.5\n  jvm: 21.0.12.1+1\n  node: 24.21.0\nsdks:\n  swift: " + strings.Repeat("ab", 32) + "\nplugins:\n"
 
 // Validate refuses each malformed shape naming the plugin and the
 // fault, and admits the well-formed ones, two-component versions
@@ -94,6 +94,10 @@ func TestValidate(t *testing.T) {
 		{"a line with a leading zero", "  a/b:\n    source: s\n    kind: swift\n    repository: o/r\n    tag: \"{version}\"\n    product: e\n    entrypoint: e\n    platforms: [linux/amd64]\n    line: v01\n", "v1.27.6\n", "no major version"},
 		{"a line that is no major", "  a/b:\n    source: s\n    kind: swift\n    repository: o/r\n    tag: \"{version}\"\n    product: e\n    entrypoint: e\n    platforms: [linux/amd64]\n    line: 1.x\n", "v1.27.6\n", "no major version"},
 		{"a version outside the line", "  a/b:\n    source: s\n    kind: swift\n    repository: o/r\n    tag: \"{version}\"\n    product: e\n    entrypoint: e\n    platforms: [linux/amd64]\n    line: v1\n", "v1.27.6\nv2.0.0\n", "outside the line v1"},
+		{"node runtime ok", "  a/b:\n    source: s\n    kind: node\n    package: \"@o/p\"\n    runtime: true\n    script: bin/e\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", ""},
+		{"node runtime without script", "  a/b:\n    source: s\n    kind: node\n    package: p\n    runtime: true\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", "runtime and script go together"},
+		{"node script without runtime", "  a/b:\n    source: s\n    kind: node\n    package: p\n    script: e\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", "runtime and script go together"},
+		{"node script escaping", "  a/b:\n    source: s\n    kind: node\n    package: p\n    runtime: true\n    script: ../e\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", "no relative path"},
 		{"jvm ok", "  a/b:\n    source: s\n    kind: jvm\n    maven: g.h:a\n    classifier: c\n    extension: sh\n    checksum: sha1\n    modules: [java.base, jdk.unsupported]\n    entrypoint: e\n    platforms: [linux/amd64, windows/arm64]\n", "v1.0.0\n", ""},
 		{"jvm without maven", "  a/b:\n    source: s\n    kind: jvm\n    checksum: sha256\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", "maven group:artifact required"},
 		{"jvm without checksum", "  a/b:\n    source: s\n    kind: jvm\n    maven: g:a\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", "checksum sha256 or sha1 required"},
@@ -221,6 +225,13 @@ func TestArgvAndJar(t *testing.T) {
 	if got := strings.Join(p.Argv(), " "); got != "/protoc-gen-x" {
 		t.Errorf("a go recipe's process: %q", got)
 	}
+	n := &Plugin{Kind: KindNode, Entrypoint: "protoc-gen-ts_proto", Package: "ts-proto", Runtime: true, Script: "protoc-gen-ts_proto"}
+	if got := strings.Join(n.Argv(), " "); got != "/node app/node_modules/ts-proto/protoc-gen-ts_proto" {
+		t.Errorf("a runtime node recipe's process: %q", got)
+	}
+	if got := strings.Join((&Plugin{Kind: KindNode, Entrypoint: "protoc-gen-x", Package: "x"}).Argv(), " "); got != "/protoc-gen-x" {
+		t.Errorf("a compiled node recipe's process: %q", got)
+	}
 	j := &Plugin{Kind: KindJvm, Entrypoint: "protoc-gen-scala", Maven: "com.thesamet.scalapb:protoc-gen-scala", Classifier: "unix", Extension: "sh"}
 	if got := strings.Join(j.Argv(), " "); got != "/jre/bin/java -Djdk.lang.Process.launchMechanism=FORK -jar protoc-gen-scala.jar" {
 		t.Errorf("a jvm recipe's process: %q", got)
@@ -266,6 +277,16 @@ func TestToolchainsPinned(t *testing.T) {
 	write(t, dir, "registry: r.example/p\nbase: r.example/base@sha256:ab\ntoolchains:\n  swift: 6.4.0\n"+sdk+"plugins:\n"+swift+dart, map[string]string{"a/b": "v1.0.0\n", "c/d": "v1.0.0\n"})
 	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "a dart recipe needs the dart toolchain pinned") {
 		t.Errorf("a dart recipe without the pin: %v", err)
+	}
+	node := "  e/f:\n    source: s\n    kind: node\n    package: p\n    runtime: true\n    script: e\n    entrypoint: e\n    platforms: [linux/amd64]\n"
+	write(t, dir, "registry: r.example/p\nbase: r.example/base@sha256:ab\ntoolchains:\n  swift: 6.4.0\n"+sdk+"plugins:\n"+swift+node, map[string]string{"a/b": "v1.0.0\n", "e/f": "v1.0.0\n"})
+	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "a node recipe running under node's runtime needs the node toolchain pinned") {
+		t.Errorf("a runtime node recipe without the pin: %v", err)
+	}
+	compiled := "  e/f:\n    source: s\n    kind: node\n    package: p\n    entrypoint: e\n    platforms: [linux/amd64]\n"
+	write(t, dir, "registry: r.example/p\nbase: r.example/base@sha256:ab\ntoolchains:\n  swift: 6.4.0\n"+sdk+"plugins:\n"+swift+compiled, map[string]string{"a/b": "v1.0.0\n", "e/f": "v1.0.0\n"})
+	if _, err := Load(dir); err != nil {
+		t.Errorf("a compiled node recipe needs no pin: %v", err)
 	}
 	for _, tc := range []struct{ name, toolchains, want string }{
 		{"swift unpinned", "toolchains:\n  rust: 1.98.1\n" + sdk, "a swift recipe needs the swift toolchain pinned"},

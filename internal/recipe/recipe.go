@@ -88,7 +88,10 @@ var builders = map[catalog.Kind]builder{
 	catalog.KindGo: func(ctx context.Context, _ *catalog.Catalog, _ string, p *catalog.Plugin, version string, platforms []string, out string) error {
 		return buildGo(ctx, p, version, platforms, out)
 	},
-	catalog.KindNode: func(ctx context.Context, _ *catalog.Catalog, _ string, p *catalog.Plugin, version string, platforms []string, out string) error {
+	catalog.KindNode: func(ctx context.Context, c *catalog.Catalog, name string, p *catalog.Plugin, version string, platforms []string, out string) error {
+		if p.Runtime {
+			return buildNodeRuntime(ctx, c, name, p, version, platforms, out)
+		}
 		return buildNode(ctx, p, version, platforms, out)
 	},
 	catalog.KindRelease: func(ctx context.Context, _ *catalog.Catalog, _ string, p *catalog.Plugin, version string, platforms []string, out string) error {
@@ -163,6 +166,31 @@ func layDown(kind catalog.Kind, name, platform, built, dst string) error {
 		return err
 	}
 	return copyFile(built, dst)
+}
+
+// copyTree copies the regular files under from to the same paths
+// under to; irregular decides a file of another kind (a link),
+// nil passing it over.
+func copyTree(from, to string, irregular func(path string) error) error {
+	return filepath.WalkDir(from, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(from, p)
+		if d.IsDir() {
+			return os.MkdirAll(filepath.Join(to, rel), 0o755)
+		}
+		if !d.Type().IsRegular() {
+			return irregular(p)
+		}
+		return copyFile(p, filepath.Join(to, rel))
+	})
+}
+
+// irregularRefused is copyTree's refusal of every file that is no
+// regular file.
+func irregularRefused(path string) error {
+	return fmt.Errorf("%s: not a regular file", path)
 }
 
 // holdExecutable holds an executable to layDown's rule for the

@@ -164,6 +164,36 @@ func download(ctx context.Context, url string) (*os.File, int64, error) {
 	return tmp, size, nil
 }
 
+// downloadHeld fetches the URL to a temporary file and holds it to
+// the sha256 upstream publishes for it, the file returned open at
+// its start with its size; publisher names upstream in the refusal.
+func downloadHeld(ctx context.Context, url, sha, publisher string) (*os.File, int64, error) {
+	fmt.Fprintf(os.Stderr, "+ fetch %s\n", url)
+	tmp, size, err := download(ctx, url)
+	if err != nil {
+		return nil, 0, err
+	}
+	if err := func() error {
+		if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
+		h := sha256.New()
+		if _, err := io.Copy(h, tmp); err != nil {
+			return err
+		}
+		if got := hex.EncodeToString(h.Sum(nil)); !strings.EqualFold(got, sha) {
+			return fmt.Errorf("%s: sha256 %s, %s publishes %s", url, got, publisher, sha)
+		}
+		_, err := tmp.Seek(0, io.SeekStart)
+		return err
+	}(); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return nil, 0, err
+	}
+	return tmp, size, nil
+}
+
 // verify compares the file's digest with the one upstream publishes
 // beside the asset: `sha256`, at the asset's URL with `.sha256`
 // appended, the hex digest the first word of the file.

@@ -20,6 +20,9 @@ var (
 	// Adoptium answers for the Temurin JDK releases: a release's
 	// assets per platform, each with its checksum.
 	Adoptium = "https://api.adoptium.net"
+	// NodeDist serves node's own binaries per platform, a release's
+	// checksums beside them in SHASUMS256.txt.
+	NodeDist = "https://nodejs.org/dist"
 	// SwiftOrg publishes the Swift releases and, per release, the
 	// static Linux SDK's bundle revision and checksum; SwiftDownload
 	// serves the bundles.

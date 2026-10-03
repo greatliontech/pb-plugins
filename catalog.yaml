@@ -3,10 +3,14 @@
 # its own. The versions published are plugins/<name>/versions, one
 # tag per line ascending; a recipe's own files under plugins/<name>/files.
 #
-# Every kind produces, per platform, a tree holding one file: the
-# entrypoint at the tree's root, which `pb plugin build` packages as
-# the image's `/<entrypoint>`. Where a kind's Linux executables link
-# the platform's C library (node, release and bazel), the Linux trees
+# Every kind produces, per platform, the tree the image's process
+# runs from: for most kinds one file, the entrypoint at the tree's
+# root, which `pb plugin build` packages as the image's
+# `/<entrypoint>`; a runtime program ships its runtime beside it (a
+# jvm recipe's `jre/`, a runtime node recipe's `node` beside the
+# package under `app/`). Where a kind's Linux executables link
+# the platform's C library (node, release, bazel, dart and jvm), the
+# Linux trees
 # are layered over `base`, pinned by its index digest and resolved to
 # the platform's own image at publish.
 registry: ghcr.io/greatliontech/pb-plugins
@@ -17,6 +21,7 @@ toolchains:
   swift: 6.4.0
   dart: 3.13.5
   jvm: 21.0.12.1+1
+  node: 24.21.0
 # The sha256 of the static Linux SDK bundle swift.org publishes for
 # the Swift release pinned above, which the runner installs beside
 # the toolchain; `catalog sdk swift` reads swift.org's and holds the
@@ -775,3 +780,30 @@ plugins:
     entrypoint: protoc-gen-connect-kotlin
     platforms: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64, windows/arm64]
     frozen: true
+
+  # kind node, running under node's own runtime: a package needing
+  # its files on disk — knit-ts loads typescript at run time, ts-proto
+  # formats its output through dprint-node's native addon — rather
+  # than compiled by bun into one executable; node's binary for every
+  # platform bundled at the version pinned above, from nodejs.org at
+  # the checksums it publishes, the image's process
+  # `/node app/node_modules/<package>/<script>`. node links the C
+  # library: base applies.
+  bufbuild/knit-ts:
+    source: https://github.com/bufbuild/knit-ts
+    kind: node
+    package: "@bufbuild/protoc-gen-knit-ts"
+    runtime: true
+    script: bin/protoc-gen-knit-ts
+    entrypoint: protoc-gen-knit-ts
+    platforms: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64, windows/arm64]
+  # dprint-node ships its addon for every platform but windows/arm64,
+  # where the generator cannot load it.
+  community/stephenh-ts-proto:
+    source: https://github.com/stephenh/ts-proto
+    kind: node
+    package: ts-proto
+    runtime: true
+    script: protoc-gen-ts_proto
+    entrypoint: protoc-gen-ts_proto
+    platforms: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64]

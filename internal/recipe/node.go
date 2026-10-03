@@ -23,6 +23,17 @@ var bunTargets = map[string]string{
 	"windows/arm64": "bun-windows-arm64",
 }
 
+// writeManifest writes the throwaway package's manifest into dir:
+// private, depending on the plugin's package at the version alone.
+func writeManifest(dir string, p *catalog.Plugin, version string) error {
+	manifest := map[string]any{
+		"name": "tree", "private": true,
+		"dependencies": map[string]string{p.Package: strings.TrimPrefix(version, "v")},
+	}
+	raw, _ := json.Marshal(manifest)
+	return os.WriteFile(filepath.Join(dir, "package.json"), raw, 0o644)
+}
+
 // buildNode installs the npm package at the version into a throwaway
 // package, no lifecycle script run, reads the executable's script
 // from the package's `bin`, and compiles it with bun into a standalone
@@ -33,12 +44,7 @@ func buildNode(ctx context.Context, p *catalog.Plugin, version string, platforms
 		return err
 	}
 	defer os.RemoveAll(tmp)
-	manifest := map[string]any{
-		"name": "tree", "private": true,
-		"dependencies": map[string]string{p.Package: strings.TrimPrefix(version, "v")},
-	}
-	raw, _ := json.Marshal(manifest)
-	if err := os.WriteFile(filepath.Join(tmp, "package.json"), raw, 0o644); err != nil {
+	if err := writeManifest(tmp, p, version); err != nil {
 		return err
 	}
 	if err := run(ctx, tmp, nil, "bun", "install", "--no-progress", "--ignore-scripts"); err != nil {

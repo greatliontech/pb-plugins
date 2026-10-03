@@ -50,7 +50,7 @@ version, as buf serves it.
 | kind | produces | platforms | discovery |
 |---|---|---|---|
 | `go` | a Go main package cross-compiled with CGO disabled, one host for every platform | all six | the module proxy; the repository's releases where the recipe names a tag |
-| `node` | an npm package's executable compiled by bun into one standalone executable per platform, one host for every platform | all six | the npm registry |
+| `node` | an npm package's executable compiled by bun into one standalone executable per platform, one host for every platform; a package needing its files on disk or a native addon runs under node's own runtime instead (`runtime`, with `script`, the executable's path within the package as its `bin` names it): node's binary bundled for every platform from nodejs.org at the checksums it publishes (`toolchains`), the package and its dependencies under `app/`, the image's process `/node app/node_modules/<package>/<script>`; the install runs on the host, so an addon serves where the package ships it for every platform itself, one fetched per platform at install serving the host alone | all six; a runtime recipe those its package's addons cover | the npm registry |
 | `release` | the executable upstream ships prebuilt, one asset per platform: a GitHub release's, or at a URL wherever upstream publishes (Maven Central, a project's binary host), the asset an archive holding it or the executable itself (an executable of its platform and architecture, by its header), a digest upstream publishes beside it verified where it publishes one | the assets upstream ships | the repository's releases, Maven Central's metadata or the npm registry, as the recipe says |
 | `bazel` | a C++ target built by bazel on a runner of the platform itself | linux and darwin on both architectures, windows/amd64 (no bazel C++ toolchain is established for windows/arm64) | the repository's releases |
 | `swift` | a SwiftPM product built by swift at the repository's tag on a runner of the platform itself, with the toolchain the catalog pins (`toolchains`), with swift.org's static Linux SDK on linux so the executable is static (held to be before it is laid down, its symbols stripped), resolved to the lockfile the package commits where it commits one | linux and darwin on both architectures (no upstream builds its generator on windows) | the repository's releases |
@@ -97,8 +97,9 @@ The six platforms are pb's: `linux/amd64`, `linux/arm64`,
 A kind lays out, per platform, the tree the image's process runs
 from: for most kinds one file, the entrypoint at the tree's root,
 which the image carries as `/<entrypoint>`; for the `jvm` kind the
-runtime under `jre/` beside the jar, the image's process the
-runtime's launcher over it. The Linux
+runtime under `jre/` beside the jar, for a runtime `node` recipe
+node's binary beside the package under `app/`, the image's process
+the runtime's launcher over it. The Linux
 executables of the `node`, `release`, `bazel`, `dart` and `jvm`
 kinds may link the platform's C library (dart's and java's runtimes
 do), so their Linux
@@ -111,9 +112,10 @@ kinds' plugins run natively.
 A rust, swift or dart recipe, like a bazel one, builds on a runner
 of the platform itself: cargo installs the crate from crates.io,
 swift builds the package at its tag, dart compiles the package's
-script, for the host alone; a jvm recipe builds every platform on
-one host, jlink linking each platform's runtime from that
-platform's modules. The pipeline installs the kind's pinned
+script, for the host alone; a jvm recipe, and a runtime node
+recipe, builds every platform on one host: jlink links each
+platform's runtime from that platform's modules, node's binary is
+prebuilt for every platform. The pipeline installs the kind's pinned
 toolchain on the runner first (rustup, swiftly, the Dart SDK from
 Google's archive at the checksum published beside it, the Temurin
 JDK from Adoptium at the checksum it publishes) and, on linux,

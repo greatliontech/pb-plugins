@@ -8,7 +8,9 @@
 # the checksum published beside it); jvm from Adoptium (the pinned
 # Temurin release's JDK for the runner's platform, held to the
 # sha256 Adoptium publishes, its jlink the one that links every
-# platform's runtime from that release's modules). The versions and targets are
+# platform's runtime from that release's modules); node needs
+# nothing installed, the runtime a recipe bundles being fetched by
+# the build. The versions and targets are
 # the catalog's, read here, so a runner installs what the catalog at
 # this commit names.
 name: toolchain
@@ -106,6 +108,12 @@ runs:
           esac
           echo "$bin" >> "$GITHUB_PATH"
           "$bin/java" -version
+          ;;
+        node)
+          # The pinned node is the runtime a recipe bundles, fetched
+          # by the build for every platform; the runner's own node
+          # runs npm for the install.
+          node --version
           ;;
         *) echo "no toolchain is pinned for the $kind kind" >&2; exit 1 ;;
         esac

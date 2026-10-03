@@ -403,7 +403,7 @@ func TestExtractTarInto(t *testing.T) {
 	os.MkdirAll(filepath.Join(from, "sub"), 0o755)
 	os.WriteFile(filepath.Join(from, "BUILD.bazel"), []byte("new"), 0o644)
 	os.WriteFile(filepath.Join(from, "sub", "x.cc"), []byte("cc"), 0o644)
-	if err := copyTree(from, filepath.Join(dir, "plugins")); err != nil {
+	if err := copyTree(from, filepath.Join(dir, "plugins"), irregularRefused); err != nil {
 		t.Fatal(err)
 	}
 	if b, _ := os.ReadFile(filepath.Join(dir, "plugins", "sub", "x.cc")); string(b) != "cc" {
@@ -1344,6 +1344,11 @@ func TestBuildJvm(t *testing.T) {
 				fmt.Fprintf(w, `{"binaries":[{"package":{"link":"http://%s/jdk-%s-%s.zip","checksum":%q}}]}`, r.Host, q.Get("os"), q.Get("architecture"), jdkZipSum)
 				return
 			}
+			if q.Get("os") == "mac" && q.Get("architecture") == "x64" {
+				// A checksum the archive disagrees with.
+				fmt.Fprintf(w, `{"binaries":[{"package":{"link":"http://%s/jdk-%s-%s.tar.gz","checksum":%q}}]}`, r.Host, q.Get("os"), q.Get("architecture"), strings.Repeat("0", 64))
+				return
+			}
 			fmt.Fprintf(w, `{"binaries":[{"package":{"link":"http://%s/jdk-%s-%s.tar.gz","checksum":%q}}]}`, r.Host, q.Get("os"), q.Get("architecture"), jdkSum)
 		case strings.HasSuffix(r.URL.Path, ".tar.gz"):
 			w.Write(jdk)
@@ -1474,6 +1479,14 @@ func TestBuildJvm(t *testing.T) {
 	if _, _, err := JDKAsset(context.Background(), "21.0.12.1+1", "linux/shaped"); err == nil || !strings.Contains(err.Error(), "no one asset with a sha256") {
 		t.Errorf("a checksum of another shape: %v", err)
 	}
+	// An archive disagreeing with the checksum Adoptium publishes is
+	// refused, and nothing of it kept.
+	if _, err := fetchJmods(context.Background(), "21.0.12.1+1", "darwin/amd64"); err == nil || !strings.Contains(err.Error(), "Adoptium publishes") {
+		t.Errorf("an archive disagreeing with Adoptium's checksum: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(jdkCache, "21.0.12.1+1", "darwin-amd64", strings.Repeat("0", 64))); err == nil {
+		t.Error("a disagreeing archive kept in the cache")
+	}
 	// A jar whose digest disagrees with Maven's is refused.
 	c.Plugins["a/b"].Classifier = "d"
 	srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1596,6 +1609,156 @@ func TestJvmKindLive(t *testing.T) {
 	}
 	if built < 8 {
 		t.Errorf("%d jvm plugin versions built, the catalog holding eight at least", built)
+	}
+}
+
+// A runtime node build installs the package with npm, holds its bin
+// to the recipe's script, copies the package's files under app/ in
+// every tree, fetches node's binary for each platform from nodejs.org
+// at the checksum SHASUMS256.txt publishes and lays it down under
+// its bare name, and probes the host's tree as the image runs it;
+// npm here a script laying the package down with the fake plugin as
+// the script.
+func TestBuildNodeRuntime(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("npm is a shell script here")
+	}
+	exe := fakePlugin(t)
+	exeBytes, err := os.ReadFile(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The host's node is a script holding the argument it is handed
+	// to the script's path relative to the tree, then answering as
+	// the fake plugin.
+	fakeNode := "#!/bin/sh\n[ \"$1\" = app/node_modules/@o/p/bin/e.js ] && [ -f \"$1\" ] || { echo \"node: $* (in $PWD)\" >&2; exit 7; }\nexec " + exe + "\n"
+	unix := tarGz(t, map[string]string{"node-v24.21.0-linux-x64/bin/": "", "node-v24.21.0-linux-x64/bin/node": fakeNode, "node-v24.21.0-linux-x64/LICENSE": "l"}, nil)
+	mac := tarGz(t, map[string]string{"node-v24.21.0-darwin-arm64/bin/node": string(machoLoading(macho.CpuArm64, "/usr/lib/libSystem.B.dylib"))}, nil)
+	win := zipped(t, map[string]string{"node-v24.21.0-win-arm64/node.exe": string(exeBytes)})
+	sums := "deadbeef  node-v24.21.0-linux-arm64.tar.gz\n" + sha256Of(unix) + "  node-v24.21.0-linux-x64.tar.gz\n" + sha256Of(mac) + "  node-v24.21.0-darwin-arm64.tar.gz\n" + sha256Of(win) + "  node-v24.21.0-win-arm64.zip\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v24.21.0/SHASUMS256.txt":
+			fmt.Fprint(w, sums)
+		case "/v24.21.1/SHASUMS256.txt":
+			fmt.Fprint(w, "\n")
+		case "/v24.21.0/node-v24.21.0-linux-x64.tar.gz":
+			w.Write(unix)
+		case "/v24.21.0/node-v24.21.0-linux-arm64.tar.gz":
+			w.Write(unix) // disagreeing with its published checksum
+		case "/v24.21.0/node-v24.21.0-darwin-arm64.tar.gz":
+			w.Write(mac)
+		case "/v24.21.0/node-v24.21.0-win-arm64.zip":
+			w.Write(win)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	saved := endpoints.NodeDist
+	endpoints.NodeDist = srv.URL
+	defer func() { endpoints.NodeDist = saved }()
+	t.Setenv("PROBE_MODE", "file")
+	bin := t.TempDir()
+	log := filepath.Join(bin, "log")
+	// npm records its call and lays the package down: its package.json
+	// naming the bin, the script a copy of the fake plugin, a
+	// dependency beside it.
+	// npm lays links down under .bin, which the tree passes over; a
+	// dependency laid down as a link, where NPM_FAKE_LINK is set, is
+	// refused.
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + log + "\nmkdir -p node_modules/@o/p/bin node_modules/dep node_modules/.bin && printf '{\"bin\":{\"e\":\"bin/e.js\"}}' > node_modules/@o/p/package.json && cp " + exe + " node_modules/@o/p/bin/e.js && printf d > node_modules/dep/index.js && ln -s ../@o/p/bin/e.js node_modules/.bin/e && mkdir -p node_modules/dep/node_modules/.bin && ln -s ../../index.js node_modules/dep/node_modules/.bin/d\n[ -z \"$NPM_FAKE_LINK\" ] || ln -s dep node_modules/linked\n"
+	if err := os.WriteFile(filepath.Join(bin, "npm"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	platforms := []string{"linux/amd64", "darwin/arm64", "windows/arm64"}
+	c := &catalog.Catalog{Toolchains: map[string]string{"node": "24.21.0"}, Plugins: map[string]*catalog.Plugin{"a/b": {Kind: catalog.KindNode, Package: "@o/p", Runtime: true, Script: "bin/e.js", Entrypoint: "e", Platforms: platforms}}}
+	out := t.TempDir()
+	if Host() != "linux/amd64" {
+		t.Skip("the fixture's host tree is linux/amd64's")
+	}
+	if err := Build(context.Background(), c, "a/b", "v1.0.0", platforms, out); err != nil {
+		t.Fatal(err)
+	}
+	calls, _ := os.ReadFile(log)
+	if got := strings.TrimSpace(string(calls)); got != "install --ignore-scripts --omit=dev --no-audit --no-fund --loglevel=error" {
+		t.Errorf("npm's call: %q", got)
+	}
+	for _, pl := range platforms {
+		tree := TreeDir(out, pl)
+		for _, f := range []string{"node", "app/node_modules/@o/p/bin/e.js", "app/node_modules/dep/index.js"} {
+			if fi, err := os.Stat(filepath.Join(tree, filepath.FromSlash(f))); err != nil || fi.Size() == 0 {
+				t.Errorf("%s: %s: %v", pl, f, err)
+			}
+		}
+		if _, err := os.Stat(filepath.Join(tree, "node.exe")); err == nil {
+			t.Errorf("%s: node.exe beside the runtime", pl)
+		}
+		// npm's links, at the top and nested under a dependency that
+		// could not be hoisted, are passed over.
+		for _, link := range []string{".bin/e", "dep/node_modules/.bin/d"} {
+			if _, err := os.Lstat(filepath.Join(tree, "app", "node_modules", filepath.FromSlash(link))); err == nil {
+				t.Errorf("%s: npm's link %s copied into the tree", pl, link)
+			}
+		}
+	}
+	// A binary disagreeing with the published checksum is refused.
+	c.Plugins["a/b"].Platforms = []string{"linux/arm64"}
+	if err := Build(context.Background(), c, "a/b", "v1.0.0", []string{"linux/arm64"}, t.TempDir()); err == nil || !strings.Contains(err.Error(), "nodejs.org publishes deadbeef") {
+		t.Errorf("a binary disagreeing with the checksum: %v", err)
+	}
+	// A script the package's bin does not name is refused.
+	c.Plugins["a/b"].Platforms, c.Plugins["a/b"].Script = platforms[:1], "bin/other.js"
+	if err := Build(context.Background(), c, "a/b", "v1.0.0", platforms[:1], t.TempDir()); err == nil || !strings.Contains(err.Error(), "the recipe's script") {
+		t.Errorf("a script the bin does not name: %v", err)
+	}
+	// A release whose checksums name no archive is refused.
+	c.Plugins["a/b"].Script, c.Toolchains["node"] = "bin/e.js", "24.21.1"
+	if err := Build(context.Background(), c, "a/b", "v1.0.0", platforms[:1], t.TempDir()); err == nil || !strings.Contains(err.Error(), "SHASUMS256.txt names no archive") {
+		t.Errorf("checksums naming no archive: %v", err)
+	}
+	// A dependency laid down as a link is refused by name.
+	c.Toolchains["node"] = "24.21.0"
+	t.Setenv("NPM_FAKE_LINK", "1")
+	if err := Build(context.Background(), c, "a/b", "v1.0.0", platforms[:1], t.TempDir()); err == nil || !strings.Contains(err.Error(), "linked: a link among the package's files") {
+		t.Errorf("a dependency laid down as a link: %v", err)
+	}
+}
+
+// The runtime node recipes build on this host at the versions the
+// catalog holds, knit-ts for every platform and the rest for the
+// host (network: the npm registry, nodejs.org; npm). Runs where
+// PBPLUGINS_LIVE is set.
+func TestNodeRuntimeLive(t *testing.T) {
+	if os.Getenv("PBPLUGINS_LIVE") == "" {
+		t.Skip("PBPLUGINS_LIVE unset")
+	}
+	c, err := catalog.Load("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	built := 0
+	for _, name := range c.Names() {
+		p := c.Plugins[name]
+		if p.Kind != catalog.KindNode || !p.Runtime {
+			continue
+		}
+		platforms := []string{Host()}
+		if name == "bufbuild/knit-ts" {
+			platforms = p.PlatformsOf()
+		}
+		for _, version := range p.Versions {
+			out := t.TempDir()
+			if err := Build(context.Background(), c, name, version, platforms, out); err != nil {
+				t.Errorf("%s %s: %v", name, version, err)
+				continue
+			}
+			built++
+		}
+	}
+	if built < 2 {
+		t.Errorf("%d runtime node plugin versions built, the catalog holding two at least", built)
 	}
 }
 
