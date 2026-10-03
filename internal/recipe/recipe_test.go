@@ -140,6 +140,17 @@ func elfOf(machine elf.Machine) []byte {
 	return b
 }
 
+// elfWithInterp is elfOf with one program header, PT_INTERP: a
+// dynamically linked executable as the loader sees it.
+func elfWithInterp(machine elf.Machine) []byte {
+	b := append(elfOf(machine), make([]byte, 56)...)
+	binary.LittleEndian.PutUint64(b[32:], 64) // the program headers' offset
+	binary.LittleEndian.PutUint16(b[54:], 56) // one entry's size
+	binary.LittleEndian.PutUint16(b[56:], 1)  // one entry
+	binary.LittleEndian.PutUint32(b[64:], uint32(elf.PT_INTERP))
+	return b
+}
+
 func machoOf(cpu macho.Cpu) []byte {
 	b := make([]byte, 32)
 	binary.LittleEndian.PutUint32(b, 0xfeedfacf)
@@ -481,8 +492,26 @@ func TestReleaseSourcesLive(t *testing.T) {
 // cargo installs the crate at the version's number, locked, into
 // the root.
 func TestCargoInstallArgs(t *testing.T) {
-	if got := strings.Join(cargoInstallArgs("connectrpc-codegen", "v0.9.0", "/r"), " "); got != "install connectrpc-codegen --version 0.9.0 --locked --root /r" {
+	if got := strings.Join(cargoInstallArgs("connectrpc-codegen", "v0.9.0", "/r", ""), " "); got != "install connectrpc-codegen --version 0.9.0 --locked --root /r" {
 		t.Errorf("cargo args: %s", got)
+	}
+	if got := strings.Join(cargoInstallArgs("c", "v1.0.0", "/r", "x86_64-unknown-linux-musl"), " "); got != "install c --version 1.0.0 --locked --root /r --target x86_64-unknown-linux-musl" {
+		t.Errorf("cargo args with a target: %s", got)
+	}
+	// linux builds for the musl target, static; the others for the
+	// runner's own; the rust kind alone adds a target.
+	for pl, want := range map[string]string{"linux/amd64": "x86_64-unknown-linux-musl", "linux/arm64": "aarch64-unknown-linux-musl", "darwin/arm64": "", "windows/amd64": ""} {
+		if got := RustTarget(pl); got != want {
+			t.Errorf("target of %s: %q, want %q", pl, got, want)
+		}
+		if got := Target(catalog.KindRust, pl); got != want {
+			t.Errorf("the rust kind's target of %s: %q, want %q", pl, got, want)
+		}
+		for _, k := range []catalog.Kind{catalog.KindGo, catalog.KindBazel, catalog.KindNode, catalog.KindRelease} {
+			if got := Target(k, pl); got != "" {
+				t.Errorf("a target for the %s kind on %s: %q", k, pl, got)
+			}
+		}
 	}
 }
 
@@ -558,9 +587,120 @@ func TestBuildRustRefusesUnlocked(t *testing.T) {
 	}
 }
 
+// A linux tree of the rust kind is static: an ELF naming an
+// interpreter is refused, one naming none passes.
+func TestCheckStatic(t *testing.T) {
+	dir := t.TempDir()
+	static, dynamic := filepath.Join(dir, "s"), filepath.Join(dir, "d")
+	os.WriteFile(static, elfOf(elf.EM_X86_64), 0o755)
+	os.WriteFile(dynamic, elfWithInterp(elf.EM_X86_64), 0o755)
+	if err := checkStatic(static); err != nil {
+		t.Errorf("a static executable: %v", err)
+	}
+	if err := checkStatic(dynamic); err == nil || !strings.Contains(err.Error(), "dynamically linked") {
+		t.Errorf("a dynamic executable: %v", err)
+	}
+	if err := checkStatic(filepath.Join(dir, "none")); err == nil {
+		t.Error("a missing file passed")
+	}
+}
+
+// A rust build on linux refuses a dynamically linked executable
+// cargo produced, laying nothing down; elsewhere no target is
+// named and the check does not apply.
+func TestBuildRustRefusesDynamic(t *testing.T) {
+	if RustTarget(Host()) == "" {
+		t.Skip("no target on this host")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("cargo is a shell script here")
+	}
+	srv := lockedCrate(t)
+	defer srv.Close()
+	bin := t.TempDir()
+	dynamic := filepath.Join(bin, "dynamic")
+	os.WriteFile(dynamic, elfWithInterp(map[string]elf.Machine{"amd64": elf.EM_X86_64, "arm64": elf.EM_AARCH64}[runtime.GOARCH]), 0o755)
+	script := "#!/bin/sh\nwhile [ $# -gt 0 ]; do if [ \"$1\" = --root ]; then root=$2; fi; shift; done\nmkdir -p \"$root/bin\" && cp " + dynamic + " \"$root/bin/e\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "cargo"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	c := &catalog.Catalog{Plugins: map[string]*catalog.Plugin{"a/b": {Kind: catalog.KindRust, Crate: "u", Entrypoint: "e", Platforms: []string{Host()}}}}
+	out := t.TempDir()
+	if err := Build(context.Background(), c, "a/b", "v1.0.0", []string{Host()}, out); err == nil || !strings.Contains(err.Error(), "dynamically linked") {
+		t.Errorf("a dynamic executable: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(TreeDir(out, Host()), "e")); err == nil {
+		t.Error("the dynamic executable was laid down")
+	}
+}
+
+// lockedCrate serves the crate u at v1.0.0 with a lockfile, as the
+// registry would.
+func lockedCrate(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/crates/u":
+			fmt.Fprint(w, `{"crate":{"name":"u"}}`)
+		case "/api/v1/crates/u/1.0.0/download":
+			w.Write(tarGz(t, map[string]string{"u-1.0.0/Cargo.toml": "[package]", "u-1.0.0/Cargo.lock": "# lock"}, nil))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	saved := endpoints.Crates
+	endpoints.Crates = srv.URL
+	t.Cleanup(func() { endpoints.Crates = saved })
+	return srv
+}
+
+// A rust build hands cargo the host platform's target: the musl one
+// on linux, where the executable is to be static, none elsewhere;
+// cargo here a script recording its arguments and laying the
+// executable down where the build reads it.
+func TestBuildRustTarget(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("cargo is a shell script here")
+	}
+	srv := lockedCrate(t)
+	defer srv.Close()
+	bin := t.TempDir()
+	log := filepath.Join(bin, "log")
+	// The root follows --root; the executable, the fake plugin so
+	// the probe is answered, lands under its bin.
+	exe := fakePlugin(t)
+	t.Setenv("PROBE_MODE", "file")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + log + "\nwhile [ $# -gt 0 ]; do if [ \"$1\" = --root ]; then root=$2; fi; shift; done\nmkdir -p \"$root/bin\" && cp " + exe + " \"$root/bin/e\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "cargo"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	c := &catalog.Catalog{Plugins: map[string]*catalog.Plugin{"a/b": {Kind: catalog.KindRust, Crate: "u", Entrypoint: "e", Platforms: []string{Host()}}}}
+	out := t.TempDir()
+	if err := Build(context.Background(), c, "a/b", "v1.0.0", []string{Host()}, out); err != nil {
+		t.Fatal(err)
+	}
+	args, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "install u --version 1.0.0 --locked --root "
+	if !strings.HasPrefix(string(args), want) {
+		t.Errorf("cargo's arguments: %q", args)
+	}
+	target := RustTarget(Host())
+	if has := strings.Contains(string(args), " --target "); has != (target != "") || (target != "" && !strings.HasSuffix(strings.TrimSpace(string(args)), " --target "+target)) {
+		t.Errorf("cargo's target on %s: %q, want %q", Host(), args, target)
+	}
+	if fi, err := os.Stat(filepath.Join(TreeDir(out, Host()), "e")); err != nil || fi.Size() == 0 {
+		t.Errorf("the tree: %v", err)
+	}
+}
+
 // The rust kind installs connectrpc/rust's crate on this host and
-// lays its executable down (network: crates.io; cargo). Runs where
-// PBPLUGINS_LIVE is set.
+// lays its executable down (network: crates.io; cargo, with the
+// musl target installed on linux). Runs where PBPLUGINS_LIVE is set.
 func TestRustKindLive(t *testing.T) {
 	if os.Getenv("PBPLUGINS_LIVE") == "" {
 		t.Skip("PBPLUGINS_LIVE unset")
@@ -624,7 +764,9 @@ func fakePlugin(t *testing.T) string {
 	if runtime.GOOS == "windows" {
 		exe += ".exe"
 	}
+	// Static, as a tree's entrypoint is held to be on linux.
 	cmd := exec.Command("go", "build", "-o", exe, "./testdata/fakeplugin")
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("building the fake plugin: %v\n%s", err, out)
 	}

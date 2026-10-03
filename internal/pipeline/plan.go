@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/greatliontech/pb-plugins/internal/catalog"
+	"github.com/greatliontech/pb-plugins/internal/recipe"
 )
 
 // runners are the GitHub-hosted runners a native recipe builds on,
@@ -39,8 +40,11 @@ type Tree struct {
 	Build     string `json:"build"`
 	Tree      string `json:"tree"`
 	// Toolchain is the pinned toolchain the kind's build needs on the
-	// runner, empty where the runner's own serves.
+	// runner, empty where the runner's own serves; Target the rust
+	// target the pipeline adds to it, empty where the runner's own
+	// serves.
 	Toolchain string `json:"toolchain"`
+	Target    string `json:"target"`
 }
 
 // Build is one publish job: a plugin version whose trees are all
@@ -101,7 +105,7 @@ func Compute(ctx context.Context, c *catalog.Catalog, exists Exists, all bool) (
 					plan.Trees.Include = append(plan.Trees.Include, Tree{
 						Plugin: name, Version: v, Kind: string(p.Kind), Platforms: pl,
 						Runner: runners[pl], Build: build, Tree: build + "-" + os + "-" + arch,
-						Toolchain: c.Toolchains[string(p.Kind)],
+						Toolchain: c.Toolchains[string(p.Kind)], Target: recipe.Target(p.Kind, pl),
 					})
 				}
 			} else {

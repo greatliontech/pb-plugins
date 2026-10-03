@@ -5,6 +5,8 @@
 //	catalog tree <plugin> <version> --platform <os/arch>[,...] --out <dir>
 //	catalog publish <plugin> <version> --trees <dir>
 //	catalog bump                        append upstream's new versions
+//	catalog toolchain <kind>            the toolchain the catalog pins
+//	catalog target <kind>               the host's target a tree job adds
 //
 // Every command reads the catalog at --catalog, the working directory
 // by default.
@@ -92,6 +94,16 @@ func run(ctx context.Context, args []string) error {
 			return fmt.Errorf("no toolchain pinned for %q", rest[0])
 		}
 		fmt.Println(v)
+		return nil
+	case "target":
+		if len(rest) != 1 {
+			return fmt.Errorf("target <kind>")
+		}
+		kind := catalog.Kind(rest[0])
+		if !kind.Known() {
+			return fmt.Errorf("no kind %q", rest[0])
+		}
+		fmt.Println(recipe.Target(kind, recipe.Host()))
 		return nil
 	case "bump":
 		added, err := pipeline.Bump(ctx, c, pipeline.Upstream)

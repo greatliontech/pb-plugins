@@ -548,10 +548,14 @@ func (p *Plugin) PlatformsOf() []string {
 // one host.
 func (k Kind) Native() bool { return k == KindBazel || k == KindRust }
 
+// Known reports whether the kind is one the catalog defines.
+func (k Kind) Known() bool { _, ok := owned[k]; return ok }
+
 // NeedsBase reports whether the kind's Linux trees are layered over
 // the catalog's base: every kind whose executables link the C
-// library, which is every kind but go.
-func (k Kind) NeedsBase() bool { return k != KindGo }
+// library, which is every kind but go and rust, whose Linux
+// executables are static.
+func (k Kind) NeedsBase() bool { return k != KindGo && k != KindRust }
 
 // Expand fills a recipe template: `{version}` with the version's
 // number (the tag less its `v`), `{tag}` with the tag as pb spells

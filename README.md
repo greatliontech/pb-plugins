@@ -52,7 +52,7 @@ line's past v0.11.17 do not, shipping as the jar alone, for the
 | `node` | an npm package's executable compiled by bun into one standalone executable per platform, one host for every platform | all six | the npm registry |
 | `release` | the executable upstream ships prebuilt, one asset per platform: a GitHub release's, or at a URL wherever upstream publishes (Maven Central, a project's binary host), the asset an archive holding it or the executable itself (an executable of its platform and architecture, by its header), a digest upstream publishes beside it verified where it publishes one | the assets upstream ships | the repository's releases, Maven Central's metadata or the npm registry, as the recipe says |
 | `bazel` | a C++ target built by bazel on a runner of the platform itself | linux and darwin on both architectures, windows/amd64 (no bazel C++ toolchain is established for windows/arm64) | the repository's releases |
-| `rust` | a crate's executable installed by cargo on a runner of the platform itself, with the toolchain the catalog pins (`toolchains`), locked to the lockfile the crate publishes (one without is refused) | all six | crates.io |
+| `rust` | a crate's executable installed by cargo on a runner of the platform itself, with the toolchain the catalog pins (`toolchains`), for the musl target on linux so the executable is static (held to be before it is laid down; a crate whose C dependencies need a musl C toolchain beyond the runner's compiler fails its tree job), locked to the lockfile the crate publishes (one without is refused) | all six | crates.io |
 
 Every kind's trees are held to the plugin protocol before they are
 handed on: the tree of the platform the build runs on answers a probe
@@ -86,13 +86,14 @@ The six platforms are pb's: `linux/amd64`, `linux/arm64`,
 `darwin/amd64`, `darwin/arm64`, `windows/amd64`, `windows/arm64`.
 Every kind lays out one file per platform, the entrypoint at the
 tree's root, which the image carries as `/<entrypoint>`. The Linux
-executables of the `node`, `release`, `bazel` and `rust` kinds may
-link the platform's C library, so their Linux trees are layered over
-the catalog's `base` (distroless `cc`, pinned by index digest and
-resolved to the platform's image at publish); the `go` kind is static
-and takes no base. On an `OS` sandbox row pb runs a Linux entrypoint
-only where it is static, so on such a host those kinds run under the
-docker runner while the Go plugins run natively.
+executables of the `node`, `release` and `bazel` kinds may link the
+platform's C library, so their Linux trees are layered over the
+catalog's `base` (distroless `cc`, pinned by index digest and
+resolved to the platform's image at publish); the `go` and `rust`
+kinds are static and take no base. On an `OS` sandbox row pb runs a
+Linux entrypoint only where it is static, so on such a host those
+kinds run under the docker runner while the go and rust kinds'
+plugins run natively.
 A rust recipe, like a bazel one, builds on a runner of the platform
 itself: cargo installs the crate from crates.io for the host alone.
 
@@ -108,8 +109,10 @@ itself: cargo installs the crate from crates.io for the host alone.
   tag exists yet. A published tag is never rebuilt: the plan leaves
   a signed one out, a published but unsigned one (a run that died
   between the two) is signed as it stands, and pb refuses to publish
-  over a tag in any case. pb itself is built from its repository
-  at the commit the `PB_COMMIT` variable names.
+  over a tag in any case; a published tree is the pipeline's at its
+  publish, so a rule the pipeline gains later reaches the versions
+  published after it. pb itself is built from its repository at the
+  commit the `PB_COMMIT` variable names.
 - `bump` (weekly, or by hand): `catalog bump` appends the versions
   upstream has above each plugin's highest and opens a pull request;
   merging publishes them. Versions below the highest are never

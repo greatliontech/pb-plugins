@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15, windows-2025]
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, windows-2025]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
@@ -27,13 +27,15 @@ jobs:
         shell: bash
       - run: go mod tidy -diff
       - run: go vet ./...
-      - name: Pin the rust toolchain, as the catalog has it
-        if: matrix.os == 'ubuntu-24.04'
+      - name: Pin the rust toolchain and the host's target, as the catalog has them
+        if: startsWith(matrix.os, 'ubuntu')
         run: |
           v=$(go run ./cmd/catalog toolchain rust)
           rustup toolchain install "$v" --profile minimal && rustup default "$v"
+          t=$(go run ./cmd/catalog target rust)
+          if [ -n "$t" ]; then rustup target add "$t"; fi
       - run: go run ./cmd/catalog check
       - run: go test ./... -count=1
         env:
-          PBPLUGINS_LIVE: ${{ matrix.os == 'ubuntu-24.04' && '1' || '' }}
+          PBPLUGINS_LIVE: ${{ startsWith(matrix.os, 'ubuntu') && '1' || '' }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

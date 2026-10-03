@@ -16,6 +16,7 @@ import (
 	"github.com/greatliontech/pb-plugins/internal/catalog"
 	"github.com/greatliontech/pb-plugins/internal/endpoints"
 	"github.com/greatliontech/pb-plugins/internal/github"
+	"github.com/greatliontech/pb-plugins/internal/recipe"
 )
 
 func load(t *testing.T) *catalog.Catalog {
@@ -46,6 +47,12 @@ func TestPlan(t *testing.T) {
 		switch {
 		case tr.Kind == "rust" && tr.Toolchain != c.Toolchains["rust"]:
 			t.Errorf("%s: toolchain %q, want the catalog's %q", tr.Tree, tr.Toolchain, c.Toolchains["rust"])
+		case tr.Kind == "rust" && tr.Target != recipe.RustTarget(tr.Platforms):
+			t.Errorf("%s: target %q, want %q", tr.Tree, tr.Target, recipe.RustTarget(tr.Platforms))
+		case tr.Kind == "rust" && strings.HasPrefix(tr.Platforms, "linux/") && tr.Target == "":
+			t.Errorf("%s: no target for a linux rust tree", tr.Tree)
+		case tr.Kind != "rust" && tr.Target != "":
+			t.Errorf("%s: a target for the %s kind: %q", tr.Tree, tr.Kind, tr.Target)
 		case tr.Kind != "rust" && tr.Toolchain != "":
 			t.Errorf("%s: a toolchain for a %s tree", tr.Tree, tr.Kind)
 		}

@@ -5,7 +5,9 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"debug/elf"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -21,8 +23,11 @@ import (
 // buildRust installs the crate at the version with cargo on the
 // platform itself — the host's — into a throwaway root, locked to
 // the crate's own lockfile, which the crate must publish (cargo
-// only warns where it does not, resolving afresh), and lays its
-// executable down as the tree's entrypoint.
+// only warns where it does not, resolving afresh), for the musl
+// target on linux, where the executable is held to be static before
+// it is laid down as the tree's entrypoint (a dynamic one, which a
+// host's RUSTFLAGS could produce, would load in no image of the
+// kind's, having no base).
 func buildRust(ctx context.Context, _ *catalog.Catalog, name string, p *catalog.Plugin, version string, platforms []string, out string) error {
 	if len(platforms) != 1 {
 		return fmt.Errorf("%s: a rust recipe builds one platform, the host's", name)
@@ -40,14 +45,37 @@ func buildRust(ctx context.Context, _ *catalog.Catalog, name string, p *catalog.
 	// own defaults, set here so a host's configuration cannot change
 	// them.
 	env := []string{"CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse", "CARGO_NET_RETRY=3"}
-	if err := run(ctx, root, env, "cargo", cargoInstallArgs(p.Crate, version, root)...); err != nil {
+	if err := run(ctx, root, env, "cargo", cargoInstallArgs(p.Crate, version, root, RustTarget(pl))...); err != nil {
 		return err
 	}
 	bin := p.Bin
 	if bin == "" {
 		bin = p.Entrypoint
 	}
-	return copyFile(filepath.Join(root, "bin", catalog.Expand(bin+"{exe}", version, pl)), filepath.Join(TreeDir(out, pl), p.Entrypoint))
+	built := filepath.Join(root, "bin", catalog.Expand(bin+"{exe}", version, pl))
+	if RustTarget(pl) != "" {
+		if err := checkStatic(built); err != nil {
+			return fmt.Errorf("%s %s: %w", name, pl, err)
+		}
+	}
+	return copyFile(built, filepath.Join(TreeDir(out, pl), p.Entrypoint))
+}
+
+// checkStatic refuses an ELF executable that names an interpreter:
+// one the OS sandbox row does not load, and one no image of a
+// baseless kind could load either.
+func checkStatic(path string) error {
+	f, err := elf.Open(path)
+	if err != nil {
+		return fmt.Errorf("no ELF executable: %w", err)
+	}
+	defer f.Close()
+	for _, p := range f.Progs {
+		if p.Type == elf.PT_INTERP {
+			return errors.New("dynamically linked: a linux tree of the rust kind is static")
+		}
+	}
+	return nil
 }
 
 // crateLocked refuses a crate whose archive at the version publishes
@@ -98,7 +126,36 @@ func crateLocked(ctx context.Context, crate, version string) error {
 }
 
 // cargoInstallArgs are cargo's arguments: the crate at the version's
-// number, locked to its lockfile, into the root.
-func cargoInstallArgs(crate, version, root string) []string {
-	return []string{"install", crate, "--version", strings.TrimPrefix(version, "v"), "--locked", "--root", root}
+// number, locked to its lockfile, into the root, for the target
+// where the platform names one.
+func cargoInstallArgs(crate, version, root, target string) []string {
+	args := []string{"install", crate, "--version", strings.TrimPrefix(version, "v"), "--locked", "--root", root}
+	if target != "" {
+		args = append(args, "--target", target)
+	}
+	return args
+}
+
+// Target is the toolchain target a tree job adds beside the kind's
+// pinned toolchain: the rust kind's platform target; nothing for
+// another kind.
+func Target(kind catalog.Kind, platform string) string {
+	if kind != catalog.KindRust {
+		return ""
+	}
+	return RustTarget(platform)
+}
+
+// RustTarget is the rust target a platform's tree is built for
+// where it is not the runner's own: on linux the musl one, whose
+// executable is static and so runs natively on an OS sandbox row;
+// darwin and windows build for the runner's target.
+func RustTarget(platform string) string {
+	switch platform {
+	case "linux/amd64":
+		return "x86_64-unknown-linux-musl"
+	case "linux/arm64":
+		return "aarch64-unknown-linux-musl"
+	}
+	return ""
 }

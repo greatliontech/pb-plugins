@@ -274,8 +274,9 @@ plugins:
   # kind rust: a crate's executable installed with cargo on a runner
   # of the platform itself, with the toolchain pinned above, locked
   # to the lockfile the crate publishes (one without is refused); the
-  # versions discovered from crates.io. The Linux executable links
-  # glibc: base applies.
+  # versions discovered from crates.io. The Linux executable is
+  # static, built for the musl target: no base (a version published
+  # before that rule keeps the trees it was published with).
   connectrpc/rust:
     source: https://github.com/connectrpc/connect-rust
     kind: rust

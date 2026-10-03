@@ -173,3 +173,25 @@ func TestExpandAndPlatforms(t *testing.T) {
 		}
 	}
 }
+
+// The catalog's kinds are known; another name is not.
+func TestKnown(t *testing.T) {
+	for _, k := range []Kind{KindGo, KindNode, KindRelease, KindBazel, KindRust} {
+		if !k.Known() {
+			t.Errorf("%s unknown", k)
+		}
+	}
+	if Kind("rustt").Known() || Kind("").Known() {
+		t.Error("a name the catalog does not define is known")
+	}
+}
+
+// The go and rust kinds' Linux executables are static and take no
+// base; every other kind's may link the C library.
+func TestNeedsBase(t *testing.T) {
+	for k, want := range map[Kind]bool{KindGo: false, KindRust: false, KindNode: true, KindRelease: true, KindBazel: true} {
+		if got := k.NeedsBase(); got != want {
+			t.Errorf("%s needs a base: %v, want %v", k, got, want)
+		}
+	}
+}
