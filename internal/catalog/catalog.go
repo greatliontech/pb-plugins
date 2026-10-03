@@ -71,10 +71,15 @@ type Plugin struct {
 	// for a plugin that answers nothing without one (an option naming
 	// where its generated code's types live).
 	Parameter string `yaml:"parameter"`
-	// Frozen says the versions file is complete: the bump appends
-	// nothing, upstream's later versions carrying the executable no
-	// more.
+	// Frozen says the name's versions are complete: the bump appends
+	// nothing — upstream's later versions carry the executable no
+	// more, or carry it under another name the catalog serves.
 	Frozen bool `yaml:"frozen"`
+	// Line is the major version the plugin's versions are of, `v1`,
+	// where upstream releases another line beside it that carries
+	// the executable no more: the bump appends versions of the line
+	// alone, and the versions file holds the line's alone.
+	Line string `yaml:"line"`
 
 	// Module and Package name a go recipe's main package: the module
 	// the versions belong to and the package's path within it (`.`
@@ -249,6 +254,7 @@ var (
 	repoRE       = regexp.MustCompile(`^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$`)
 	mavenRE      = regexp.MustCompile(`^[A-Za-z0-9._-]+:[A-Za-z0-9._-]+$`)
 	crateRE      = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{0,63}$`)
+	lineRE       = regexp.MustCompile(`^v(0|[1-9][0-9]*)$`)
 	toolchainRE  = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
 	checksumRE   = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
@@ -284,7 +290,7 @@ var unserved = map[Kind]map[string]bool{
 
 // common are the fields every kind takes; a release recipe's
 // platforms are its assets' keys, so it takes no `platforms`.
-var common = []string{"source", "kind", "entrypoint", "silent", "frozen", "parameter"}
+var common = []string{"source", "kind", "entrypoint", "silent", "frozen", "line", "parameter"}
 
 func fields(names ...string) map[string]bool {
 	set := map[string]bool{}
@@ -545,6 +551,16 @@ func (c *Catalog) Validate() error {
 				fail(name, "platform %q twice", pl)
 			}
 			seen[pl] = true
+		}
+		if p.Line != "" {
+			if !lineRE.MatchString(p.Line) {
+				fail(name, "line %q is no major version (v1)", p.Line)
+			}
+			for _, v := range p.Versions {
+				if semver.Major(v) != p.Line {
+					fail(name, "version %s is outside the line %s", v, p.Line)
+				}
+			}
 		}
 		if p.Frozen && len(p.Versions) == 0 {
 			fail(name, "frozen with no version: a versions file is complete only holding one")

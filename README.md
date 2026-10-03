@@ -83,8 +83,13 @@ reads the repository through GitHub's API, a token in
 `GITHUB_TOKEN` authenticating it where set. A release recipe's
 `members` names a platform's member where upstream lays that
 platform's archive out differently from the rest. A plugin marked
-`frozen` takes no further version from the bump, its versions file
-complete (a generator that left its module).
+`frozen` takes no further version from the bump, the name's versions
+complete (a generator that left its module, or a name upstream
+released under before a move, the catalog serving the new name
+beside it); one naming a `line`
+(`v1`) takes versions of that major alone, upstream releasing
+another line beside it that carries the executable no more
+(grpc-swift's 2.x, whose generator moved to grpc-swift-protobuf).
 
 The six platforms are pb's: `linux/amd64`, `linux/arm64`,
 `darwin/amd64`, `darwin/arm64`, `windows/amd64`, `windows/arm64`.
@@ -130,7 +135,8 @@ path is refused rather than published to load on the runner alone.
   merging publishes them. Versions below the highest are never
   backfilled by the bump; a version enters by hand.
 - `CI` (pull requests): format, vet, the catalog's validation and the
-  tests, the live recipe test included.
+  tests, the live recipe tests included on the linux and darwin
+  rows, each building its own platform's trees.
 
 ## Trust
 
