@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/greatliontech/pb-plugins/internal/catalog"
+	"github.com/greatliontech/pb-plugins/internal/endpoints"
 	"github.com/greatliontech/pb-plugins/internal/github"
 	"github.com/greatliontech/pb-plugins/internal/web"
 	"golang.org/x/mod/module"
@@ -65,21 +66,12 @@ func Bump(ctx context.Context, c *catalog.Catalog, discover Discover) (map[strin
 	return added, nil
 }
 
-// Proxy is the module proxy's base URL; a test points it at a fake.
-var Proxy = "https://proxy.golang.org"
-
-// Maven is Maven Central's base URL; a test points it at a fake.
-var Maven = "https://repo1.maven.org/maven2"
-
-// Npm is the npm registry's base URL; a test points it at a fake.
-var Npm = "https://registry.npmjs.org"
-
 // Upstream discovers versions from where each kind's versions live:
 // the module proxy for go — the repository's releases where the
 // recipe builds from a tag — the npm registry for node, the GitHub
 // releases of the repository for release and bazel — Maven Central's
 // metadata or the npm registry for a release recipe naming its
-// artifact or package.
+// artifact or package — crates.io for rust.
 func Upstream(ctx context.Context, p *catalog.Plugin) ([]string, error) {
 	switch p.Kind {
 	case catalog.KindGo:
@@ -99,6 +91,8 @@ func Upstream(ctx context.Context, p *catalog.Plugin) ([]string, error) {
 		return releaseVersions(ctx, p.Repository, p.Tag)
 	case catalog.KindBazel:
 		return releaseVersions(ctx, p.Repository, p.Tag)
+	case catalog.KindRust:
+		return cratesVersions(ctx, p.Crate)
 	}
 	return nil, fmt.Errorf("unknown kind %q", p.Kind)
 }
@@ -108,7 +102,7 @@ func goVersions(ctx context.Context, mod string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	body, err := web.Get(ctx, Proxy+"/"+escaped+"/@v/list", nil)
+	body, err := web.Get(ctx, endpoints.Proxy+"/"+escaped+"/@v/list", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +110,7 @@ func goVersions(ctx context.Context, mod string) ([]string, error) {
 }
 
 func npmVersions(ctx context.Context, pkg string) ([]string, error) {
-	body, err := web.Get(ctx, Npm+"/"+pkg, map[string]string{"Accept": "application/vnd.npm.install-v1+json"})
+	body, err := web.Get(ctx, endpoints.Npm+"/"+pkg, map[string]string{"Accept": "application/vnd.npm.install-v1+json"})
 	if err != nil {
 		return nil, err
 	}
@@ -133,11 +127,37 @@ func npmVersions(ctx context.Context, pkg string) ([]string, error) {
 	return vs, nil
 }
 
+// cratesVersions lists the crate's versions from crates.io, the
+// yanked ones left out; the registry asks every client to name
+// itself.
+func cratesVersions(ctx context.Context, crate string) ([]string, error) {
+	body, err := web.Get(ctx, endpoints.Crates+"/api/v1/crates/"+crate+"/versions", map[string]string{"User-Agent": endpoints.UserAgent})
+	if err != nil {
+		return nil, err
+	}
+	var doc struct {
+		Versions []struct {
+			Num    string `json:"num"`
+			Yanked bool   `json:"yanked"`
+		} `json:"versions"`
+	}
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return nil, err
+	}
+	var vs []string
+	for _, v := range doc.Versions {
+		if !v.Yanked {
+			vs = append(vs, "v"+v.Num)
+		}
+	}
+	return vs, nil
+}
+
 // mavenVersions lists the artifact's versions from Maven Central's
 // metadata, `group:artifact` laid out as the repository has it.
 func mavenVersions(ctx context.Context, artifact string) ([]string, error) {
 	group, name, _ := strings.Cut(artifact, ":")
-	body, err := web.Get(ctx, Maven+"/"+strings.ReplaceAll(group, ".", "/")+"/"+name+"/maven-metadata.xml", nil)
+	body, err := web.Get(ctx, endpoints.Maven+"/"+strings.ReplaceAll(group, ".", "/")+"/"+name+"/maven-metadata.xml", nil)
 	if err != nil {
 		return nil, err
 	}

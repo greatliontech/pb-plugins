@@ -42,7 +42,7 @@ func write(t *testing.T, dir, catalogYAML string, versions map[string]string) {
 	}
 }
 
-const head = "registry: r.example/p\nbase: r.example/base@sha256:" + "ab" + "\nplugins:\n"
+const head = "registry: r.example/p\nbase: r.example/base@sha256:" + "ab" + "\ntoolchains:\n  rust: 1.98.1\nplugins:\n"
 
 // Validate refuses each malformed shape naming the plugin and the
 // fault, and admits the well-formed ones, two-component versions
@@ -56,7 +56,7 @@ func TestValidate(t *testing.T) {
 	}{
 		{"go ok", "  a/b:\n    source: s\n    kind: go\n    module: m\n    package: .\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\nv36.2\n", ""},
 		{"bad name", "  ab:\n    source: s\n    kind: go\n    module: m\n    package: .\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", "not owner/plugin"},
-		{"unknown kind", "  a/b:\n    source: s\n    kind: rust\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", "unknown kind"},
+		{"unknown kind", "  a/b:\n    source: s\n    kind: zig\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", "unknown kind"},
 		{"go tags, frozen, silent", "  a/b:\n    source: s\n    kind: go\n    module: m\n    package: .\n    tags: [t]\n    entrypoint: e\n    platforms: [linux/amd64]\n    silent: true\n    frozen: true\n", "v1.0.0\n", ""},
 		{"frozen, no version", "  a/b:\n    source: s\n    kind: go\n    module: m\n    package: .\n    entrypoint: e\n    platforms: [linux/amd64]\n    frozen: true\n", "", "frozen with no version"},
 		{"node tags", "  a/b:\n    source: s\n    kind: node\n    package: p\n    tags: [t]\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", "a field of another kind"},
@@ -84,6 +84,12 @@ func TestValidate(t *testing.T) {
 		{"release members", "  a/b:\n    source: s\n    kind: release\n    npm: p\n    member: bin/e\n    members:\n      darwin/amd64: x64/e\n    entrypoint: e\n    assets:\n      linux/amd64: https://x/v{version}/l.tar.gz\n      darwin/amd64: https://x/v{version}/d.tar.gz\n", "v1.0.0\n", ""},
 		{"release members without asset", "  a/b:\n    source: s\n    kind: release\n    npm: p\n    member: bin/e\n    members:\n      darwin/arm64: x64/e\n    entrypoint: e\n    assets:\n      linux/amd64: https://x/v{version}/l.tar.gz\n", "v1.0.0\n", "has no asset"},
 		{"release members for an executable", "  a/b:\n    source: s\n    kind: release\n    maven: g:a\n    members:\n      linux/amd64: x\n    entrypoint: e\n    assets:\n      linux/amd64: https://x/{version}.exe\n", "v1.0.0\n", "takes no member"},
+		{"rust ok", "  a/b:\n    source: s\n    kind: rust\n    crate: c-d\n    bin: e2\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", ""},
+		{"rust crate as a flag", "  a/b:\n    source: s\n    kind: rust\n    crate: --offline\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", "a letter first"},
+		{"rust without crate", "  a/b:\n    source: s\n    kind: rust\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", "crate required"},
+		{"rust bin path", "  a/b:\n    source: s\n    kind: rust\n    crate: c\n    bin: bin/e\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", "no bare name"},
+		{"rust foreign field", "  a/b:\n    source: s\n    kind: rust\n    crate: c\n    module: m\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", "a field of another kind"},
+		{"go with crate", "  a/b:\n    source: s\n    kind: go\n    module: m\n    package: .\n    crate: c\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", "a field of another kind"},
 		{"release maven malformed", "  a/b:\n    source: s\n    kind: release\n    maven: g/a\n    entrypoint: e\n    assets:\n      linux/amd64: https://x/{version}.exe\n", "v1.0.0\n", "no group:artifact"},
 		{"go with maven", "  a/b:\n    source: s\n    kind: go\n    module: m\n    package: .\n    maven: g:a\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", "a field of another kind"},
 		{"release with platforms", "  a/b:\n    source: s\n    kind: release\n    repository: o/r\n    tag: v{version}\n    member: bin/e\n    entrypoint: e\n    platforms: [linux/amd64]\n    assets:\n      linux/amd64: x.tar.gz\n", "v1.0.0\n", "a field of another kind"},

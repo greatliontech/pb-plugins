@@ -85,6 +85,7 @@ var builders = map[catalog.Kind]builder{
 		return buildRelease(ctx, p, version, platforms, out)
 	},
 	catalog.KindBazel: buildBazel,
+	catalog.KindRust:  buildRust,
 }
 
 // run executes a command in dir with the environment added to the

@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/greatliontech/pb-plugins/internal/catalog"
+	"github.com/greatliontech/pb-plugins/internal/endpoints"
 	"github.com/greatliontech/pb-plugins/internal/github"
 )
 
@@ -38,6 +39,16 @@ func TestPlan(t *testing.T) {
 	plan, err := Compute(context.Background(), c, exists, false)
 	if err != nil {
 		t.Fatal(err)
+	}
+	// A rust tree carries the catalog's pinned toolchain; a bazel one
+	// none.
+	for _, tr := range plan.Trees.Include {
+		switch {
+		case tr.Kind == "rust" && tr.Toolchain != c.Toolchains["rust"]:
+			t.Errorf("%s: toolchain %q, want the catalog's %q", tr.Tree, tr.Toolchain, c.Toolchains["rust"])
+		case tr.Kind != "rust" && tr.Toolchain != "":
+			t.Errorf("%s: a toolchain for a %s tree", tr.Tree, tr.Kind)
+		}
 	}
 	builds := map[string]bool{}
 	for _, b := range plan.Builds.Include {
@@ -391,9 +402,9 @@ func TestUpstreamGoFromATag(t *testing.T) {
 		fmt.Fprint(w, "v1.0.0\nv1.1.0\n")
 	}))
 	defer proxy.Close()
-	savedProxy := Proxy
-	Proxy = proxy.URL
-	defer func() { Proxy = savedProxy }()
+	savedProxy := endpoints.Proxy
+	endpoints.Proxy = proxy.URL
+	defer func() { endpoints.Proxy = savedProxy }()
 	vs, err = Upstream(context.Background(), &catalog.Plugin{Kind: catalog.KindGo, Module: "m.example/x"})
 	if err != nil || strings.Join(vs, " ") != "v1.0.0 v1.1.0" {
 		t.Fatalf("versions from the proxy: %v %v", vs, err)
@@ -415,9 +426,9 @@ func TestUpstreamReleaseSources(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	savedMaven, savedNpm := Maven, Npm
-	Maven, Npm = srv.URL, srv.URL
-	defer func() { Maven, Npm = savedMaven, savedNpm }()
+	savedMaven, savedNpm := endpoints.Maven, endpoints.Npm
+	endpoints.Maven, endpoints.Npm = srv.URL, srv.URL
+	defer func() { endpoints.Maven, endpoints.Npm = savedMaven, savedNpm }()
 	vs, err := Upstream(context.Background(), &catalog.Plugin{Kind: catalog.KindRelease, Maven: "io.grpc:protoc-gen-grpc-java"})
 	if err != nil || strings.Join(vs, " ") != "v1.83.1 v1.84.0" {
 		t.Fatalf("maven: %v %v", vs, err)
@@ -426,5 +437,25 @@ func TestUpstreamReleaseSources(t *testing.T) {
 	sort.Strings(vs)
 	if err != nil || strings.Join(vs, " ") != "v1.13.0 v1.13.1" {
 		t.Fatalf("npm: %v %v", vs, err)
+	}
+}
+
+// A rust recipe discovers its versions from crates.io, the yanked
+// ones left out.
+func TestUpstreamRust(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/crates/c/versions" || !strings.Contains(r.Header.Get("User-Agent"), "pb-plugins") {
+			http.NotFound(w, r)
+			return
+		}
+		fmt.Fprint(w, `{"versions":[{"num":"0.9.0","yanked":false},{"num":"0.8.1","yanked":true},{"num":"0.8.0","yanked":false}]}`)
+	}))
+	defer srv.Close()
+	saved := endpoints.Crates
+	endpoints.Crates = srv.URL
+	defer func() { endpoints.Crates = saved }()
+	vs, err := Upstream(context.Background(), &catalog.Plugin{Kind: catalog.KindRust, Crate: "c"})
+	if err != nil || strings.Join(vs, " ") != "v0.9.0 v0.8.0" {
+		t.Fatalf("crates: %v %v", vs, err)
 	}
 }

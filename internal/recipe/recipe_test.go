@@ -12,6 +12,7 @@ import (
 	"debug/pe"
 	"encoding/binary"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -22,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/greatliontech/pb-plugins/internal/catalog"
+	"github.com/greatliontech/pb-plugins/internal/endpoints"
 )
 
 func tarGz(t *testing.T, entries map[string]string, links map[string]string) []byte {
@@ -394,6 +396,9 @@ func TestBuildRefusals(t *testing.T) {
 	if err := Build(context.Background(), c, "grpc/web", "v2.1.1", []string{other}, out); err == nil || !strings.Contains(err.Error(), "builds on the platform itself") {
 		t.Errorf("native kind off-host: %v", err)
 	}
+	if err := Build(context.Background(), c, "connectrpc/rust", "v0.9.0", []string{other}, out); err == nil || !strings.Contains(err.Error(), "builds on the platform itself") {
+		t.Errorf("rust kind off-host: %v", err)
+	}
 	if err := Build(context.Background(), c, "nobody/none", "v1.0.0", []string{"linux/amd64"}, out); err == nil {
 		t.Error("an unknown plugin built")
 	}
@@ -470,6 +475,106 @@ func TestReleaseSourcesLive(t *testing.T) {
 				t.Errorf("%s %s: %v", name, pl, err)
 			}
 		}
+	}
+}
+
+// cargo installs the crate at the version's number, locked, into
+// the root.
+func TestCargoInstallArgs(t *testing.T) {
+	if got := strings.Join(cargoInstallArgs("connectrpc-codegen", "v0.9.0", "/r"), " "); got != "install connectrpc-codegen --version 0.9.0 --locked --root /r" {
+		t.Errorf("cargo args: %s", got)
+	}
+}
+
+// A crate whose archive publishes no Cargo.lock is refused before
+// cargo runs; one with it passes.
+func TestCrateLocked(t *testing.T) {
+	// As crates.io does: the crate's entry answers any spelling of
+	// its name with the canonical one; the archive is served under
+	// the canonical spelling alone.
+	files := map[string][]byte{
+		"/api/v1/crates/lock-ed/1.0.0/download":  tarGz(t, map[string]string{"lock-ed-1.0.0/Cargo.toml": "[package]", "lock-ed-1.0.0/Cargo.lock": "# lock"}, nil),
+		"/api/v1/crates/unlocked/1.0.0/download": tarGz(t, map[string]string{"unlocked-1.0.0/Cargo.toml": "[package]"}, nil),
+	}
+	canonical := map[string]string{"lock-ed": "lock-ed", "Lock-ed": "lock-ed", "lock_ed": "lock-ed", "unlocked": "unlocked"}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.Header.Get("User-Agent"), "pb-plugins") {
+			http.Error(w, "name yourself", http.StatusForbidden)
+			return
+		}
+		if name, ok := canonical[strings.TrimPrefix(r.URL.Path, "/api/v1/crates/")]; ok {
+			fmt.Fprintf(w, `{"crate":{"name":%q}}`, name)
+			return
+		}
+		if b, ok := files[r.URL.Path]; ok {
+			w.Write(b)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	saved := endpoints.Crates
+	endpoints.Crates = srv.URL
+	defer func() { endpoints.Crates = saved }()
+	if err := crateLocked(context.Background(), "lock-ed", "v1.0.0"); err != nil {
+		t.Errorf("a locked crate: %v", err)
+	}
+	// Another spelling of the name: the registry's entry gives the
+	// canonical one, under which the archive is read.
+	for _, spelling := range []string{"Lock-ed", "lock_ed"} {
+		if err := crateLocked(context.Background(), spelling, "v1.0.0"); err != nil {
+			t.Errorf("a locked crate spelled %s: %v", spelling, err)
+		}
+	}
+	if err := crateLocked(context.Background(), "unlocked", "v1.0.0"); err == nil || !strings.Contains(err.Error(), "publishes no Cargo.lock") {
+		t.Errorf("an unlocked crate: %v", err)
+	}
+	if err := crateLocked(context.Background(), "missing", "v1.0.0"); err == nil {
+		t.Error("a missing crate passed")
+	}
+}
+
+// A rust build refuses an unlocked crate before cargo runs: with no
+// cargo on the path, the refusal is the lock check's, not cargo's.
+func TestBuildRustRefusesUnlocked(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/crates/u":
+			fmt.Fprint(w, `{"crate":{"name":"u"}}`)
+		case "/api/v1/crates/u/1.0.0/download":
+			w.Write(tarGz(t, map[string]string{"u-1.0.0/Cargo.toml": "[package]"}, nil))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	saved := endpoints.Crates
+	endpoints.Crates = srv.URL
+	defer func() { endpoints.Crates = saved }()
+	t.Setenv("PATH", t.TempDir())
+	c := &catalog.Catalog{Plugins: map[string]*catalog.Plugin{"a/b": {Kind: catalog.KindRust, Crate: "u", Entrypoint: "e", Platforms: []string{Host()}}}}
+	if err := Build(context.Background(), c, "a/b", "v1.0.0", []string{Host()}, t.TempDir()); err == nil || !strings.Contains(err.Error(), "publishes no Cargo.lock") {
+		t.Errorf("an unlocked crate: %v", err)
+	}
+}
+
+// The rust kind installs connectrpc/rust's crate on this host and
+// lays its executable down (network: crates.io; cargo). Runs where
+// PBPLUGINS_LIVE is set.
+func TestRustKindLive(t *testing.T) {
+	if os.Getenv("PBPLUGINS_LIVE") == "" {
+		t.Skip("PBPLUGINS_LIVE unset")
+	}
+	c, err := catalog.Load("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := t.TempDir()
+	if err := Build(context.Background(), c, "connectrpc/rust", "v0.9.0", []string{Host()}, out); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(filepath.Join(TreeDir(out, Host()), "protoc-gen-connect-rust")); err != nil || fi.Size() == 0 {
+		t.Errorf("the tree: %v", err)
 	}
 }
 
@@ -555,15 +660,17 @@ func TestProbe(t *testing.T) {
 	dir := t.TempDir()
 	ctx := context.Background()
 	for _, c := range []struct {
-		mode   string
-		silent bool
-		want   string
+		mode      string
+		parameter string
+		silent    bool
+		want      string
 	}{
-		{"file", false, ""}, {"file", true, ""}, {"error", false, "answered the probe with an error: go_package missing"}, {"error", true, "answered the probe with an error"},
-		{"features", false, "no file"}, {"features", true, ""}, {"empty", false, "wrote nothing"}, {"empty", true, "wrote nothing"},
-		{"garbage", false, "no plugin response"}, {"exit3", false, "exit status 3: boom"},
+		{"file", "", false, ""}, {"file", "", true, ""}, {"error", "", false, "answered the probe with an error: go_package missing"}, {"error", "", true, "answered the probe with an error"},
+		{"features", "", false, "no file"}, {"features", "", true, ""}, {"empty", "", false, "wrote nothing"}, {"empty", "", true, "wrote nothing"},
+		{"garbage", "", false, "no plugin response"}, {"exit3", "", false, "exit status 3: boom"},
+		{"parameter", "", false, "parameter p=1 required"}, {"parameter", "p=1", false, ""},
 	} {
-		err := Probe(ctx, modeScript(t, dir, c.mode, exe, c.mode), c.silent)
+		err := Probe(ctx, modeScript(t, dir, c.mode, exe, c.mode), c.parameter, c.silent)
 		if (c.want == "") != (err == nil) || (err != nil && !strings.Contains(err.Error(), c.want)) {
 			t.Errorf("%s silent=%v: %v, want %q", c.mode, c.silent, err, c.want)
 		}
@@ -575,7 +682,7 @@ func TestProbe(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PROBE_MODE", "file")
-	if err := Probe(ctx, bare, false); err != nil {
+	if err := Probe(ctx, bare, "", false); err != nil {
 		t.Errorf("a bare-named executable: %v", err)
 	}
 }
@@ -640,6 +747,17 @@ func TestBuildProbes(t *testing.T) {
 	t.Setenv("PROBE_MODE", "file")
 	if err := Build(context.Background(), c, "a/b", "v1.0.0", []string{Host(), other}, t.TempDir()); err != nil {
 		t.Errorf("a tree answering a file refused: %v", err)
+	}
+	// The recipe's parameter reaches the probe's request: a plugin
+	// answering nothing without it is refused where the recipe names
+	// none, built where it does.
+	t.Setenv("PROBE_MODE", "parameter")
+	if err := Build(context.Background(), c, "a/b", "v1.0.0", []string{Host()}, t.TempDir()); err == nil || !strings.Contains(err.Error(), "parameter p=1 required") {
+		t.Errorf("a plugin needing a parameter built without one: %v", err)
+	}
+	c.Plugins["a/b"].Parameter = "p=1"
+	if err := Build(context.Background(), c, "a/b", "v1.0.0", []string{Host()}, t.TempDir()); err != nil {
+		t.Errorf("the recipe's parameter not carried: %v", err)
 	}
 }
 

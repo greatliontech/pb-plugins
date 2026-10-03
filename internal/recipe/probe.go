@@ -22,8 +22,8 @@ const probeTimeout = 2 * time.Minute
 // probeRequest is the plugin-protocol request the probe hands a built
 // executable: one proto3 file of a package, a request and a response
 // message, and a service with one rpc over them — the shapes every
-// generator of the catalog acts on — with no parameter.
-func probeRequest() ([]byte, error) {
+// generator of the catalog acts on — with the recipe's parameter, where it names one.
+func probeRequest(parameter string) ([]byte, error) {
 	str := descriptorpb.FieldDescriptorProto_TYPE_STRING
 	label := descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL
 	field := func(name string, num int32) *descriptorpb.FieldDescriptorProto {
@@ -43,7 +43,11 @@ func probeRequest() ([]byte, error) {
 			Method: []*descriptorpb.MethodDescriptorProto{{Name: proto.String("Call"), InputType: proto.String(".probe.v1.CallRequest"), OutputType: proto.String(".probe.v1.CallResponse")}},
 		}},
 	}
-	return proto.Marshal(&pluginpb.CodeGeneratorRequest{FileToGenerate: []string{file.GetName()}, ProtoFile: []*descriptorpb.FileDescriptorProto{file}})
+	req := &pluginpb.CodeGeneratorRequest{FileToGenerate: []string{file.GetName()}, ProtoFile: []*descriptorpb.FileDescriptorProto{file}}
+	if parameter != "" {
+		req.Parameter = proto.String(parameter)
+	}
+	return proto.Marshal(req)
 }
 
 // probeTree probes the host's tree where one was built: the probe
@@ -52,7 +56,7 @@ func probeRequest() ([]byte, error) {
 func probeTree(ctx context.Context, p *catalog.Plugin, platforms []string, out string) error {
 	for _, pl := range platforms {
 		if pl == Host() {
-			return Probe(ctx, filepath.Join(TreeDir(out, pl), p.Entrypoint), p.Silent)
+			return Probe(ctx, filepath.Join(TreeDir(out, pl), p.Entrypoint), p.Parameter, p.Silent)
 		}
 	}
 	return nil
@@ -67,8 +71,10 @@ func probeTree(ctx context.Context, p *catalog.Plugin, platforms []string, out s
 // A silent plugin, one generating only for options the probe's file
 // lacks, answers with a response holding no file, bytes all the
 // same: its features, as every generator's framework writes them.
-func Probe(ctx context.Context, exe string, silent bool) error {
-	req, err := probeRequest()
+// The request carries the recipe's parameter, for a plugin that
+// answers nothing without one.
+func Probe(ctx context.Context, exe, parameter string, silent bool) error {
+	req, err := probeRequest(parameter)
 	if err != nil {
 		return err
 	}

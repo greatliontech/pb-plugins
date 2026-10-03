@@ -39,6 +39,13 @@ func main() {
 	case "garbage":
 		fmt.Print("hello world")
 		return
+	case "parameter":
+		// A plugin that answers nothing without its parameter.
+		if req.GetParameter() != "p=1" {
+			fmt.Fprintln(os.Stderr, "parameter p=1 required")
+			os.Exit(1)
+		}
+		resp = &pluginpb.CodeGeneratorResponse{File: []*pluginpb.CodeGeneratorResponse_File{{Name: proto.String(req.FileToGenerate[0] + ".txt"), Content: proto.String("x")}}}
 	case "exit3":
 		fmt.Fprintln(os.Stderr, "boom")
 		os.Exit(3)

@@ -38,6 +38,9 @@ type Tree struct {
 	Runner    string `json:"runner"`
 	Build     string `json:"build"`
 	Tree      string `json:"tree"`
+	// Toolchain is the pinned toolchain the kind's build needs on the
+	// runner, empty where the runner's own serves.
+	Toolchain string `json:"toolchain"`
 }
 
 // Build is one publish job: a plugin version whose trees are all
@@ -98,6 +101,7 @@ func Compute(ctx context.Context, c *catalog.Catalog, exists Exists, all bool) (
 					plan.Trees.Include = append(plan.Trees.Include, Tree{
 						Plugin: name, Version: v, Kind: string(p.Kind), Platforms: pl,
 						Runner: runners[pl], Build: build, Tree: build + "-" + os + "-" + arch,
+						Toolchain: c.Toolchains[string(p.Kind)],
 					})
 				}
 			} else {

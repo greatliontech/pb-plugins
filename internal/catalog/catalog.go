@@ -13,6 +13,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -38,6 +39,9 @@ const (
 	// KindBazel builds a C++ target with bazel from an upstream source
 	// archive, on a runner of the platform itself.
 	KindBazel Kind = "bazel"
+	// KindRust installs a crate's executable with cargo, on a runner
+	// of the platform itself.
+	KindRust Kind = "rust"
 )
 
 // Platforms is every platform a recipe may serve, in the spelling
@@ -60,6 +64,10 @@ type Plugin struct {
 	// to the probe (recipe.Probe); every other plugin answers with a
 	// file.
 	Silent bool `yaml:"silent"`
+	// Parameter is the plugin parameter the probe's request carries,
+	// for a plugin that answers nothing without one (an option naming
+	// where its generated code's types live).
+	Parameter string `yaml:"parameter"`
 	// Frozen says the versions file is complete: the bump appends
 	// nothing, upstream's later versions carrying the executable no
 	// more.
@@ -108,6 +116,12 @@ type Plugin struct {
 	// digest first on its line), verified before the asset is read.
 	Checksum string `yaml:"checksum"`
 
+	// Crate names a rust recipe's package on crates.io, whose
+	// versions are the recipe's; Bin the executable the crate
+	// installs, where it is not the entrypoint's name.
+	Crate string `yaml:"crate"`
+	Bin   string `yaml:"bin"`
+
 	// Archive is a bazel recipe's source archive URL, Strip the
 	// leading path components dropped extracting it, Files the
 	// directory under the source tree the recipe's own files
@@ -142,6 +156,9 @@ type Catalog struct {
 	// Base is the image, by index digest, the Linux trees of a node,
 	// release or bazel recipe are layered over.
 	Base string `yaml:"base"`
+	// Toolchains pin, by kind, the toolchain the pipeline installs
+	// before building a kind's trees (`rust`: the rust release).
+	Toolchains map[string]string `yaml:"toolchains"`
 	// Plugins by name, buf's `owner/plugin`.
 	Plugins map[string]*Plugin `yaml:"plugins"`
 	// Dir is the catalog's directory, where plugins/ lies.
@@ -218,7 +235,50 @@ var (
 	entrypointRE = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 	repoRE       = regexp.MustCompile(`^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$`)
 	mavenRE      = regexp.MustCompile(`^[A-Za-z0-9._-]+:[A-Za-z0-9._-]+$`)
+	crateRE      = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{0,63}$`)
+	toolchainRE  = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
 )
+
+// owned is the recipe fields each kind may set, by the fields'
+// YAML keys — the common ones every kind's — the one table the
+// foreign-field refusal reads, so a new kind or field is named once.
+var owned = map[Kind]map[string]bool{
+	KindGo:      fields("platforms", "module", "dir", "package", "tags", "repository", "tag"),
+	KindNode:    fields("platforms", "package"),
+	KindRelease: fields("repository", "tag", "assets", "member", "members", "maven", "npm", "checksum"),
+	KindBazel:   fields("platforms", "repository", "tag", "archive", "strip", "files", "target", "output", "options"),
+	KindRust:    fields("platforms", "crate", "bin"),
+}
+
+// common are the fields every kind takes; a release recipe's
+// platforms are its assets' keys, so it takes no `platforms`.
+var common = []string{"source", "kind", "entrypoint", "silent", "frozen", "parameter"}
+
+func fields(names ...string) map[string]bool {
+	set := map[string]bool{}
+	for _, n := range append(names, common...) {
+		set[n] = true
+	}
+	return set
+}
+
+// setFields names the recipe fields the entry sets, by their YAML
+// keys, in the struct's order.
+func (p *Plugin) setFields() []string {
+	var out []string
+	v := reflect.ValueOf(*p)
+	t := v.Type()
+	for i := 0; i < t.NumField(); i++ {
+		key, _, _ := strings.Cut(t.Field(i).Tag.Get("yaml"), ",")
+		if key == "" || key == "-" {
+			continue
+		}
+		if !v.Field(i).IsZero() {
+			out = append(out, key)
+		}
+	}
+	return out
+}
 
 // MemberOf is the member of a platform's asset: the platform's own
 // where Members names one, else Member.
@@ -276,6 +336,21 @@ func (c *Catalog) Validate() error {
 	if len(c.Plugins) == 0 {
 		errs = append(errs, errors.New("no plugins"))
 	}
+	for kind, v := range c.Toolchains {
+		if kind != string(KindRust) {
+			errs = append(errs, fmt.Errorf("toolchains: %q names no kind the pipeline pins a toolchain for", kind))
+		}
+		if !toolchainRE.MatchString(v) {
+			errs = append(errs, fmt.Errorf("toolchains: %s %q is no release number", kind, v))
+		}
+	}
+	hasRust := false
+	for _, p := range c.Plugins {
+		hasRust = hasRust || p.Kind == KindRust
+	}
+	if hasRust && c.Toolchains[string(KindRust)] == "" {
+		errs = append(errs, errors.New("toolchains: a rust recipe needs the rust toolchain pinned"))
+	}
 	for _, name := range c.Names() {
 		p := c.Plugins[name]
 		if !nameRE.MatchString(name) {
@@ -311,15 +386,9 @@ func (c *Catalog) Validate() error {
 			} else if p.Module == "" {
 				fail(name, "go: module required")
 			}
-			if p.Assets != nil || p.Member != "" || p.Members != nil || p.Maven != "" || p.Npm != "" || p.Checksum != "" || p.Archive != "" || p.Files != "" || p.Target != "" || p.Output != "" || p.Options != nil {
-				fail(name, "go: a field of another kind set")
-			}
 		case KindNode:
 			if p.Package == "" {
 				fail(name, "node: package required")
-			}
-			if p.Module != "" || p.Dir != "" || p.Tags != nil || p.Repository != "" || p.Tag != "" || p.Assets != nil || p.Member != "" || p.Members != nil || p.Maven != "" || p.Npm != "" || p.Checksum != "" || p.Archive != "" || p.Files != "" || p.Target != "" || p.Output != "" || p.Options != nil {
-				fail(name, "node: a field of another kind set")
 			}
 		case KindRelease:
 			if len(p.Assets) == 0 {
@@ -375,9 +444,6 @@ func (c *Catalog) Validate() error {
 					fail(name, "release: asset %q is no archive, the executable itself, which takes no member", asset)
 				}
 			}
-			if p.Platforms != nil || p.Module != "" || p.Dir != "" || p.Package != "" || p.Tags != nil || p.Archive != "" || p.Files != "" || p.Target != "" || p.Output != "" || p.Options != nil {
-				fail(name, "release: a field of another kind set (platforms are the assets' keys)")
-			}
 			platforms = make([]string, 0, len(p.Assets))
 			for pl := range p.Assets {
 				platforms = append(platforms, pl)
@@ -386,9 +452,6 @@ func (c *Catalog) Validate() error {
 		case KindBazel:
 			if !repoRE.MatchString(p.Repository) || !strings.Contains(p.Tag, "{version}") || !strings.Contains(p.Archive, "{version}") || p.Target == "" || p.Output == "" {
 				fail(name, "bazel: repository, tag and archive with {version}, target and output required")
-			}
-			if p.Module != "" || p.Dir != "" || p.Package != "" || p.Tags != nil || p.Assets != nil || p.Member != "" || p.Members != nil || p.Maven != "" || p.Npm != "" || p.Checksum != "" {
-				fail(name, "bazel: a field of another kind set")
 			}
 			if p.Files != "" && (filepath.IsAbs(p.Files) || strings.Contains(p.Files, "..") || strings.Contains(p.Files, "/")) {
 				fail(name, "bazel: files %q is no bare directory name", p.Files)
@@ -401,8 +464,20 @@ func (c *Catalog) Validate() error {
 					fail(name, "bazel: options for %q, no operating system", os)
 				}
 			}
+		case KindRust:
+			if !crateRE.MatchString(p.Crate) {
+				fail(name, "rust: crate required, a crates.io package name (a letter first, 64 at most)")
+			}
+			if p.Bin != "" && !entrypointRE.MatchString(p.Bin) {
+				fail(name, "rust: bin %q is no bare name", p.Bin)
+			}
 		default:
 			fail(name, "unknown kind %q", p.Kind)
+		}
+		for _, field := range p.setFields() {
+			if !owned[p.Kind][field] {
+				fail(name, "%s: a field of another kind set (%s)", p.Kind, field)
+			}
 		}
 		if len(platforms) == 0 {
 			fail(name, "no platforms")
@@ -471,7 +546,7 @@ func (p *Plugin) PlatformsOf() []string {
 // Native reports whether the kind builds on the platform itself, one
 // runner per platform, rather than cross-building every platform on
 // one host.
-func (k Kind) Native() bool { return k == KindBazel }
+func (k Kind) Native() bool { return k == KindBazel || k == KindRust }
 
 // NeedsBase reports whether the kind's Linux trees are layered over
 // the catalog's base: every kind whose executables link the C

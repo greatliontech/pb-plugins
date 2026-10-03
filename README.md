@@ -14,7 +14,8 @@ executables the recipes produce.
 ## Layout
 
 - `catalog.yaml` — the plugins: upstream, recipe kind, entrypoint,
-  platforms served, and the recipe's parameters.
+  platforms served, and the recipe's parameters; the registry, the
+  `base` image and the `toolchains` the pipeline pins by kind.
 - `plugins/<owner>/<plugin>/versions` — the tags published, one per
   line ascending, in buf's spelling (`v1.36.12`; `v36.2` where
   upstream's releases carry two components). A recipe's own files
@@ -33,8 +34,8 @@ and `pluginrpc`, and of the rest `apple/swift`,
 `community/scalapb-scala`, `community/scalapb-zio-grpc`,
 `community/planetscale-vtprotobuf` and the community generators the
 `go` and `node` kinds build. A plugin enters when its kind exists:
-the four kinds below first, then kinds for the rest — `rust`,
-`swift`, `dart`, `jvm` and `python`. A plugin that is a program for
+the kinds below first, then kinds for the rest — `swift`,
+`dart`, `jvm` and `python`. A plugin that is a program for
 a runtime rather than one executable (a jar, a Python package) ships
 the runtime in its image behind a native launcher as the entrypoint,
 never compiled to a native executable here; where upstream itself
@@ -51,17 +52,22 @@ line's past v0.11.17 do not, shipping as the jar alone, for the
 | `node` | an npm package's executable compiled by bun into one standalone executable per platform, one host for every platform | all six | the npm registry |
 | `release` | the executable upstream ships prebuilt, one asset per platform: a GitHub release's, or at a URL wherever upstream publishes (Maven Central, a project's binary host), the asset an archive holding it or the executable itself (an executable of its platform and architecture, by its header), a digest upstream publishes beside it verified where it publishes one | the assets upstream ships | the repository's releases, Maven Central's metadata or the npm registry, as the recipe says |
 | `bazel` | a C++ target built by bazel on a runner of the platform itself | linux and darwin on both architectures, windows/amd64 (no bazel C++ toolchain is established for windows/arm64) | the repository's releases |
+| `rust` | a crate's executable installed by cargo on a runner of the platform itself, with the toolchain the catalog pins (`toolchains`), locked to the lockfile the crate publishes (one without is refused) | all six | crates.io |
 
 Every kind's trees are held to the plugin protocol before they are
-handed on: the tree of the platform the build runs on answers a
-probe — one proto3 file with a message pair and a service, the
-request a generator acts on — with a response holding a file; a tree
-that writes nothing, or no response, or exits non-zero, or answers
-with an error of its own, fails the build. A plugin generating only
-for options the probe's file lacks is marked `silent` in the catalog:
-its response holds no file, and bytes all the same (its features, as
-every generator's framework writes them). A go recipe's `tags` are
-its build tags. A go recipe whose tags the module proxy does not
+handed on: the tree of the platform the build runs on answers a probe
+— one proto3 file with a message pair and a service, the request a
+generator acts on — with a response holding a file; a tree that writes
+nothing, or no response, or exits non-zero, or answers with an error
+of its own, fails the build. A plugin generating only for options the
+probe's file lacks is marked `silent` in the catalog: its response
+holds no file, and bytes all the same (its features, as every
+generator's framework writes them). A plugin that refuses to run
+without a parameter — one naming where its generated code's types live
+— names one as the recipe's `parameter`, which the probe's request
+carries; it is the probe's alone, no default a consumer's generation
+sees. A go recipe's `tags` are its build tags.
+A go recipe whose tags the module proxy does not
 list — unprefixed tags, or a nested module the repository releases
 under its root's tags — names its `repository`, a `tag` template and
 the module's `dir` in the repository (`.` for the root) in place of
@@ -80,13 +86,15 @@ The six platforms are pb's: `linux/amd64`, `linux/arm64`,
 `darwin/amd64`, `darwin/arm64`, `windows/amd64`, `windows/arm64`.
 Every kind lays out one file per platform, the entrypoint at the
 tree's root, which the image carries as `/<entrypoint>`. The Linux
-executables of the `node`, `release` and `bazel` kinds may link the
-platform's C library, so their Linux trees are layered over the
-catalog's `base` (distroless `cc`, pinned by index digest and
-resolved to the platform's image at publish); the `go` kind is
-static and takes no base. On an `OS` sandbox row pb runs a Linux
-entrypoint only where it is static, so on such a host these three
-kinds run under the docker runner while the Go plugins run natively.
+executables of the `node`, `release`, `bazel` and `rust` kinds may
+link the platform's C library, so their Linux trees are layered over
+the catalog's `base` (distroless `cc`, pinned by index digest and
+resolved to the platform's image at publish); the `go` kind is static
+and takes no base. On an `OS` sandbox row pb runs a Linux entrypoint
+only where it is static, so on such a host those kinds run under the
+docker runner while the Go plugins run natively.
+A rust recipe, like a bazel one, builds on a runner of the platform
+itself: cargo installs the crate from crates.io for the host alone.
 
 ## Pipeline
 

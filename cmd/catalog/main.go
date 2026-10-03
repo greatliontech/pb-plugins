@@ -83,6 +83,16 @@ func run(ctx context.Context, args []string) error {
 		}
 		p := &pipeline.Publisher{Catalog: c, Registry: registry.New(), PB: *pb, Cosign: *cosign, Trees: *trees, Out: os.Stdout}
 		return p.Publish(ctx, rest[0], rest[1])
+	case "toolchain":
+		if len(rest) != 1 {
+			return fmt.Errorf("toolchain <kind>")
+		}
+		v, ok := c.Toolchains[rest[0]]
+		if !ok {
+			return fmt.Errorf("no toolchain pinned for %q", rest[0])
+		}
+		fmt.Println(v)
+		return nil
 	case "bump":
 		added, err := pipeline.Bump(ctx, c, pipeline.Upstream)
 		if err != nil {

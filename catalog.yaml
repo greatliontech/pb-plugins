@@ -11,6 +11,9 @@
 # the platform's own image at publish.
 registry: ghcr.io/greatliontech/pb-plugins
 base: gcr.io/distroless/cc-debian13@sha256:4594d59540d1948417f6ca2829ddd9294493a7c68b7528f4dd459de7f203a750
+# The toolchains the pipeline pins on a runner before a kind's build.
+toolchains:
+  rust: 1.98.1
 
 plugins:
   # kind go: a Go main package cross-compiled with CGO disabled to
@@ -266,6 +269,21 @@ plugins:
     dir: protoc_plugins
     package: protoc-gen-php-grpc
     entrypoint: protoc-gen-php-grpc
+    platforms: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64, windows/arm64]
+
+  # kind rust: a crate's executable installed with cargo on a runner
+  # of the platform itself, with the toolchain pinned above, locked
+  # to the lockfile the crate publishes (one without is refused); the
+  # versions discovered from crates.io. The Linux executable links
+  # glibc: base applies.
+  connectrpc/rust:
+    source: https://github.com/connectrpc/connect-rust
+    kind: rust
+    crate: connectrpc-codegen
+    entrypoint: protoc-gen-connect-rust
+    # The generator answers nothing without the module its message
+    # types live in.
+    parameter: extern_path=.=crate::proto
     platforms: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64, windows/arm64]
 
   # kind release: an executable an upstream GitHub release ships
