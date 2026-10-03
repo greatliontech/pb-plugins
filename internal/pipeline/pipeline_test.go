@@ -3,6 +3,9 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -10,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/greatliontech/pb-plugins/internal/catalog"
+	"github.com/greatliontech/pb-plugins/internal/github"
 )
 
 func load(t *testing.T) *catalog.Catalog {
@@ -355,5 +359,42 @@ func TestTagVersion(t *testing.T) {
 		if ok != (tc.want != "") || got != tc.want {
 			t.Errorf("%s: %q %v", tc.tag, got, ok)
 		}
+	}
+}
+
+// A go recipe built from a repository tag discovers its versions
+// through the repository's releases, read through the tag template;
+// one without a repository through the module proxy's list.
+func TestUpstreamGoFromATag(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/o/r/releases" {
+			http.NotFound(w, r)
+			return
+		}
+		fmt.Fprint(w, `[{"tag_name":"1.4.1"},{"tag_name":"v0.4"},{"tag_name":"1.4.0","prerelease":true}]`)
+	}))
+	defer srv.Close()
+	saved := github.API
+	github.API = srv.URL
+	defer func() { github.API = saved }()
+	p := &catalog.Plugin{Kind: catalog.KindGo, Dir: ".", Repository: "o/r", Tag: "{version}"}
+	vs, err := Upstream(context.Background(), p)
+	if err != nil || strings.Join(vs, " ") != "v1.4.1" {
+		t.Fatalf("versions from the releases: %v %v", vs, err)
+	}
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/m.example/x/@v/list" {
+			http.NotFound(w, r)
+			return
+		}
+		fmt.Fprint(w, "v1.0.0\nv1.1.0\n")
+	}))
+	defer proxy.Close()
+	savedProxy := Proxy
+	Proxy = proxy.URL
+	defer func() { Proxy = savedProxy }()
+	vs, err = Upstream(context.Background(), &catalog.Plugin{Kind: catalog.KindGo, Module: "m.example/x"})
+	if err != nil || strings.Join(vs, " ") != "v1.0.0 v1.1.0" {
+		t.Fatalf("versions from the proxy: %v %v", vs, err)
 	}
 }

@@ -4,13 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"os"
 	"sort"
 	"strings"
 
 	"github.com/greatliontech/pb-plugins/internal/catalog"
+	"github.com/greatliontech/pb-plugins/internal/github"
+	"github.com/greatliontech/pb-plugins/internal/web"
 	"golang.org/x/mod/module"
 	"golang.org/x/mod/semver"
 )
@@ -65,13 +64,19 @@ func Bump(ctx context.Context, c *catalog.Catalog, discover Discover) (map[strin
 	return added, nil
 }
 
+// Proxy is the module proxy's base URL; a test points it at a fake.
+var Proxy = "https://proxy.golang.org"
+
 // Upstream discovers versions from where each kind's versions live:
-// the module proxy for go, the npm registry for node, the GitHub
-// releases of the repository for release and bazel. A GitHub token
-// in GITHUB_TOKEN, where set, authenticates the releases listing.
+// the module proxy for go — the repository's releases where the
+// recipe builds from a tag — the npm registry for node, the GitHub
+// releases of the repository for release and bazel.
 func Upstream(ctx context.Context, p *catalog.Plugin) ([]string, error) {
 	switch p.Kind {
 	case catalog.KindGo:
+		if p.Repository != "" {
+			return releaseVersions(ctx, p.Repository, p.Tag)
+		}
 		return goVersions(ctx, p.Module)
 	case catalog.KindNode:
 		return npmVersions(ctx, p.Package)
@@ -81,35 +86,12 @@ func Upstream(ctx context.Context, p *catalog.Plugin) ([]string, error) {
 	return nil, fmt.Errorf("unknown kind %q", p.Kind)
 }
 
-func get(ctx context.Context, url string, header map[string]string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-	for k, v := range header {
-		req.Header.Set(k, v)
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%s: %s", url, resp.Status)
-	}
-	return body, nil
-}
-
 func goVersions(ctx context.Context, mod string) ([]string, error) {
 	escaped, err := module.EscapePath(mod)
 	if err != nil {
 		return nil, err
 	}
-	body, err := get(ctx, "https://proxy.golang.org/"+escaped+"/@v/list", nil)
+	body, err := web.Get(ctx, Proxy+"/"+escaped+"/@v/list", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -117,7 +99,7 @@ func goVersions(ctx context.Context, mod string) ([]string, error) {
 }
 
 func npmVersions(ctx context.Context, pkg string) ([]string, error) {
-	body, err := get(ctx, "https://registry.npmjs.org/"+pkg, map[string]string{"Accept": "application/vnd.npm.install-v1+json"})
+	body, err := web.Get(ctx, "https://registry.npmjs.org/"+pkg, map[string]string{"Accept": "application/vnd.npm.install-v1+json"})
 	if err != nil {
 		return nil, err
 	}
@@ -140,34 +122,17 @@ func npmVersions(ctx context.Context, pkg string) ([]string, error) {
 // around `{version}`, and a tag of another shape is no version.
 func releaseVersions(ctx context.Context, repo, template string) ([]string, error) {
 	prefix, suffix, _ := strings.Cut(template, "{version}")
-	header := map[string]string{"Accept": "application/vnd.github+json"}
-	if tok := os.Getenv("GITHUB_TOKEN"); tok != "" {
-		header["Authorization"] = "Bearer " + tok
+	releases, err := github.Releases(ctx, repo)
+	if err != nil {
+		return nil, err
 	}
 	var vs []string
-	for page := 1; page <= 10; page++ {
-		body, err := get(ctx, fmt.Sprintf("https://api.github.com/repos/%s/releases?per_page=100&page=%d", repo, page), header)
-		if err != nil {
-			return nil, err
+	for _, r := range releases {
+		if r.Draft || r.Prerelease {
+			continue
 		}
-		var releases []struct {
-			Tag        string `json:"tag_name"`
-			Draft      bool   `json:"draft"`
-			Prerelease bool   `json:"prerelease"`
-		}
-		if err := json.Unmarshal(body, &releases); err != nil {
-			return nil, err
-		}
-		for _, r := range releases {
-			if r.Draft || r.Prerelease {
-				continue
-			}
-			if v, ok := TagVersion(r.Tag, prefix, suffix); ok {
-				vs = append(vs, v)
-			}
-		}
-		if len(releases) < 100 {
-			break
+		if v, ok := TagVersion(r.Tag, prefix, suffix); ok {
+			vs = append(vs, v)
 		}
 	}
 	return vs, nil

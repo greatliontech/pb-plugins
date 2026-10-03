@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -65,15 +66,23 @@ type Plugin struct {
 
 	// Module and Package name a go recipe's main package: the module
 	// the versions belong to and the package's path within it (`.`
-	// for the module's root).
+	// for the module's root). A go recipe built from a repository
+	// tag names no module: Dir is the module's directory in the
+	// repository (`.` for its root), and the module's path is read
+	// from the go.mod there at the tag's commit — upstream's own
+	// fact, a nested module's major suffix among it.
 	Module  string `yaml:"module"`
+	Dir     string `yaml:"dir"`
 	Package string `yaml:"package"`
 	// Tags are a go recipe's build tags.
 	Tags []string `yaml:"tags"`
 
 	// Repository is the GitHub repository of a release or bazel
-	// recipe, `owner/name`; Tag spells its release tag from a
-	// version (`{version}` the tag with pb's `v` stripped).
+	// recipe, `owner/name`, or of a go recipe whose versions are the
+	// repository's releases rather than the module proxy's list — a
+	// tag the proxy does not list, fetched at the tag's commit; Tag
+	// spells the release tag from a version (`{version}` the tag
+	// with pb's `v` stripped).
 	Repository string `yaml:"repository"`
 	Tag        string `yaml:"tag"`
 	// Assets map a platform to the release asset holding the
@@ -241,24 +250,42 @@ func (c *Catalog) Validate() error {
 		platforms := p.Platforms
 		switch p.Kind {
 		case KindGo:
-			if p.Module == "" || p.Package == "" {
-				fail(name, "go: module and package required")
+			if p.Package == "" {
+				fail(name, "go: package required")
 			}
-			if p.Repository != "" || p.Tag != "" || p.Assets != nil || p.Member != "" || p.Archive != "" || p.Files != "" || p.Target != "" || p.Output != "" || p.Options != nil {
+			if (p.Repository != "") != (p.Tag != "") || (p.Repository != "") != (p.Dir != "") {
+				fail(name, "go: repository, tag and dir go together")
+			}
+			if p.Repository != "" {
+				if !repoRE.MatchString(p.Repository) || !strings.Contains(p.Tag, "{version}") {
+					fail(name, "go: repository owner/name and tag with {version} required")
+				}
+				if p.Module != "" {
+					fail(name, "go: the module is read from the repository's go.mod, not named")
+				}
+				// A slash-separated, clean, relative path, as the API
+				// addresses the repository's tree, the same on every host.
+				if !fs.ValidPath(p.Dir) || strings.Contains(p.Dir, "\\") {
+					fail(name, "go: dir %q is no relative directory", p.Dir)
+				}
+			} else if p.Module == "" {
+				fail(name, "go: module required")
+			}
+			if p.Assets != nil || p.Member != "" || p.Archive != "" || p.Files != "" || p.Target != "" || p.Output != "" || p.Options != nil {
 				fail(name, "go: a field of another kind set")
 			}
 		case KindNode:
 			if p.Package == "" {
 				fail(name, "node: package required")
 			}
-			if p.Module != "" || p.Tags != nil || p.Repository != "" || p.Tag != "" || p.Assets != nil || p.Member != "" || p.Archive != "" || p.Files != "" || p.Target != "" || p.Output != "" || p.Options != nil {
+			if p.Module != "" || p.Dir != "" || p.Tags != nil || p.Repository != "" || p.Tag != "" || p.Assets != nil || p.Member != "" || p.Archive != "" || p.Files != "" || p.Target != "" || p.Output != "" || p.Options != nil {
 				fail(name, "node: a field of another kind set")
 			}
 		case KindRelease:
 			if !repoRE.MatchString(p.Repository) || !strings.Contains(p.Tag, "{version}") || len(p.Assets) == 0 || p.Member == "" {
 				fail(name, "release: repository, tag with {version}, assets and member required")
 			}
-			if p.Platforms != nil || p.Module != "" || p.Package != "" || p.Tags != nil || p.Archive != "" || p.Files != "" || p.Target != "" || p.Output != "" || p.Options != nil {
+			if p.Platforms != nil || p.Module != "" || p.Dir != "" || p.Package != "" || p.Tags != nil || p.Archive != "" || p.Files != "" || p.Target != "" || p.Output != "" || p.Options != nil {
 				fail(name, "release: a field of another kind set (platforms are the assets' keys)")
 			}
 			platforms = make([]string, 0, len(p.Assets))
@@ -270,7 +297,7 @@ func (c *Catalog) Validate() error {
 			if !repoRE.MatchString(p.Repository) || !strings.Contains(p.Tag, "{version}") || !strings.Contains(p.Archive, "{version}") || p.Target == "" || p.Output == "" {
 				fail(name, "bazel: repository, tag and archive with {version}, target and output required")
 			}
-			if p.Module != "" || p.Package != "" || p.Tags != nil || p.Assets != nil || p.Member != "" {
+			if p.Module != "" || p.Dir != "" || p.Package != "" || p.Tags != nil || p.Assets != nil || p.Member != "" {
 				fail(name, "bazel: a field of another kind set")
 			}
 			if p.Files != "" && (filepath.IsAbs(p.Files) || strings.Contains(p.Files, "..") || strings.Contains(p.Files, "/")) {

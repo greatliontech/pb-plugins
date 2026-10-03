@@ -45,7 +45,7 @@ the `release` kind takes upstream's.
 
 | kind | produces | platforms | discovery |
 |---|---|---|---|
-| `go` | a Go main package cross-compiled with CGO disabled, one host for every platform | all six | the module proxy |
+| `go` | a Go main package cross-compiled with CGO disabled, one host for every platform | all six | the module proxy; the repository's releases where the recipe names a tag |
 | `node` | an npm package's executable compiled by bun into one standalone executable per platform, one host for every platform | all six | the npm registry |
 | `release` | the executable an upstream GitHub release ships prebuilt, one asset per platform | the assets upstream ships | the repository's releases |
 | `bazel` | a C++ target built by bazel on a runner of the platform itself | linux and darwin on both architectures, windows/amd64 (no bazel C++ toolchain is established for windows/arm64) | the repository's releases |
@@ -59,9 +59,18 @@ with an error of its own, fails the build. A plugin generating only
 for options the probe's file lacks is marked `silent` in the catalog:
 its response holds no file, and bytes all the same (its features, as
 every generator's framework writes them). A go recipe's `tags` are
-its build tags; a plugin marked `frozen` takes no further version
-from the bump, its versions file complete (a generator that left its
-module).
+its build tags. A go recipe whose tags the module proxy does not
+list — unprefixed tags, or a nested module the repository releases
+under its root's tags — names its `repository`, a `tag` template and
+the module's `dir` in the repository (`.` for the root) in place of
+a `module`: its versions are the repository's releases, and the
+module is fetched at the tag's commit, which the proxy serves as a
+pseudo-version, its path read from the `go.mod` there — upstream's
+own fact, a nested module's major suffix among it. Such a build
+reads the repository through GitHub's API, a token in
+`GITHUB_TOKEN` authenticating it where set. A plugin marked
+`frozen` takes no further version from the bump, its versions file
+complete (a generator that left its module).
 
 The six platforms are pb's: `linux/amd64`, `linux/arm64`,
 `darwin/amd64`, `darwin/arm64`, `windows/amd64`, `windows/arm64`.

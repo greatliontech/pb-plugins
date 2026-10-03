@@ -244,6 +244,30 @@ plugins:
     entrypoint: protoc-gen-ts
     platforms: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64, windows/arm64]
 
+  # kind go from a repository tag: the versions are the repository's
+  # releases, their tags not on the module proxy's list — unprefixed,
+  # or a nested module's released under the root's tags — and the
+  # module, named by its directory, is fetched at the tag's commit,
+  # its path read from the go.mod there.
+  community/chrusty-jsonschema:
+    source: https://github.com/chrusty/protoc-gen-jsonschema
+    kind: go
+    repository: chrusty/protoc-gen-jsonschema
+    tag: "{version}"
+    dir: .
+    package: cmd/protoc-gen-jsonschema
+    entrypoint: protoc-gen-jsonschema
+    platforms: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64, windows/arm64]
+  community/roadrunner-server-php-grpc:
+    source: https://github.com/roadrunner-server/grpc
+    kind: go
+    repository: roadrunner-server/grpc
+    tag: v{version}
+    dir: protoc_plugins
+    package: protoc-gen-php-grpc
+    entrypoint: protoc-gen-php-grpc
+    platforms: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64, windows/arm64]
+
   # kind release: an executable an upstream GitHub release ships
   # prebuilt, one asset per platform it ships for, the member named
   # extracted from it; the versions discovered from the releases. The

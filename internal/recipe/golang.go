@@ -2,18 +2,44 @@ package recipe
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
+	"golang.org/x/mod/modfile"
+
 	"github.com/greatliontech/pb-plugins/internal/catalog"
+	"github.com/greatliontech/pb-plugins/internal/github"
 )
 
 // buildGo cross-compiles the main package from a throwaway module
-// requiring the plugin's module at the version: CGO disabled, paths
-// trimmed, symbols and the build id stripped, so the executable is a
-// function of the toolchain and the module alone.
+// requiring the plugin's module at the version — at the commit the
+// version's tag names where the recipe builds from a repository tag
+// the module proxy does not list, the module's path read from its
+// go.mod at that commit and the proxy serving the module there as a
+// pseudo-version — CGO disabled, paths trimmed, symbols and the
+// build id stripped, so the executable is a function of the
+// toolchain and the module alone.
 func buildGo(ctx context.Context, p *catalog.Plugin, version string, platforms []string, out string) error {
+	module, at := p.Module, version
+	if p.Repository != "" {
+		tag := catalog.Expand(p.Tag, version, "")
+		commit, err := github.TagCommit(ctx, p.Repository, tag)
+		if err != nil {
+			return fmt.Errorf("%s at %s: %w", p.Repository, tag, err)
+		}
+		gomod, err := github.File(ctx, p.Repository, commit, path.Join(p.Dir, "go.mod"))
+		if err != nil {
+			return fmt.Errorf("%s at %s: %w", p.Repository, tag, err)
+		}
+		module = modfile.ModulePath(gomod)
+		if module == "" {
+			return fmt.Errorf("%s at %s: %s names no module", p.Repository, tag, path.Join(p.Dir, "go.mod"))
+		}
+		at = commit
+	}
 	tmp, err := os.MkdirTemp("", "pb-plugins-go-")
 	if err != nil {
 		return err
@@ -26,12 +52,12 @@ func buildGo(ctx context.Context, p *catalog.Plugin, version string, platforms [
 	// where the host's is older, so a plugin never fails to build for
 	// the host's toolchain lagging its module.
 	env := []string{"GOTOOLCHAIN=auto", "GOFLAGS=-mod=mod"}
-	if err := run(ctx, tmp, env, "go", "get", p.Module+"@"+version); err != nil {
+	if err := run(ctx, tmp, env, "go", "get", module+"@"+at); err != nil {
 		return err
 	}
-	pkg := p.Module
+	pkg := module
 	if p.Package != "." {
-		pkg = p.Module + "/" + strings.TrimPrefix(p.Package, "./")
+		pkg = module + "/" + strings.TrimPrefix(p.Package, "./")
 	}
 	for _, pl := range platforms {
 		goos, goarch := catalog.SplitPlatform(pl)

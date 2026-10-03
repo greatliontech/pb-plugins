@@ -231,6 +231,29 @@ func TestGoKindLive(t *testing.T) {
 	}
 }
 
+// The go kind builds from a repository tag the module proxy does not
+// list: an unprefixed tag, and a nested module at the root tag's
+// commit with `{major}` in its path (network: GitHub and the module
+// proxy). Runs where PBPLUGINS_LIVE is set.
+func TestGoKindFromATagLive(t *testing.T) {
+	if os.Getenv("PBPLUGINS_LIVE") == "" {
+		t.Skip("PBPLUGINS_LIVE unset")
+	}
+	c, err := catalog.Load("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, version := range map[string]string{"community/chrusty-jsonschema": "v1.4.1", "community/roadrunner-server-php-grpc": "v5.3.0"} {
+		out := t.TempDir()
+		if err := Build(context.Background(), c, name, version, []string{Host()}, out); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if fi, err := os.Stat(filepath.Join(TreeDir(out, Host()), c.Plugins[name].Entrypoint)); err != nil || fi.Size() == 0 {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
 // The bazel command carries the operating system's startup options
 // first, the short output root on windows, then the build with its
 // options and the target.
