@@ -64,12 +64,13 @@ handed on: the tree of the platform the build runs on answers a probe
 generator acts on — with a response holding a file; a tree that writes
 nothing, or no response, or exits non-zero, or answers with an error
 of its own, fails the build. A plugin generating only for options the
-probe's file lacks is marked `silent` in the catalog: its response
-holds no file, and bytes all the same (its features, as every
-generator's framework writes them). A plugin that refuses to run
-without a parameter — one naming where its generated code's types live
-— names one as the recipe's `parameter`, which the probe's request
-carries; it is the probe's alone, no default a consumer's generation
+probe's file lacks — or for an import that carries them — is marked
+`silent` in the catalog: its response holds no file, and bytes all
+the same (its features, as every generator's framework writes them).
+A plugin that refuses to run without a parameter — one naming where
+its generated code's types live — names one as the recipe's
+`parameter`, which the probe's request carries; it is the probe's
+alone, no default a consumer's generation
 sees. A go recipe's `tags` are its build tags.
 A go recipe whose tags the module proxy does not
 list — unprefixed tags, or a nested module the repository releases
