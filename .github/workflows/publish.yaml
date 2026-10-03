@@ -73,6 +73,11 @@ jobs:
         if: matrix.kind == 'node'
         with:
           bun-version: 1.4.2
+      - name: Pin the toolchain
+        if: matrix.toolchain != ''
+        uses: ./.github/actions/toolchain
+        with:
+          kind: ${{ matrix.kind }}
       - name: Build the trees
         run: go run ./cmd/catalog tree "${{ matrix.plugin }}" "${{ matrix.version }}" --platform "${{ matrix.platforms }}" --out trees
         env:

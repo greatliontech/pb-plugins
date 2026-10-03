@@ -8,6 +8,7 @@
 //	catalog toolchain <kind>            the toolchain the catalog pins
 //	catalog target <kind>               the host's target a tree job adds
 //	catalog sdk <kind>                  the SDK the target needs: its URL and the pinned checksum
+//	catalog jdk <kind>                  the host's JDK of the pinned release: its URL and Adoptium's checksum
 //
 // Every command reads the catalog at --catalog, the working directory
 // by default.
@@ -123,6 +124,23 @@ func run(ctx context.Context, args []string) error {
 			return err
 		}
 		fmt.Println(url, pin)
+		return nil
+	case "jdk":
+		if len(rest) != 1 {
+			return fmt.Errorf("jdk <kind>")
+		}
+		if catalog.Kind(rest[0]) != catalog.KindJvm {
+			return fmt.Errorf("no JDK for kind %q", rest[0])
+		}
+		v, ok := c.Toolchains[rest[0]]
+		if !ok {
+			return fmt.Errorf("no toolchain pinned for %q", rest[0])
+		}
+		link, sum, err := recipe.JDKAsset(ctx, v, recipe.Host())
+		if err != nil {
+			return err
+		}
+		fmt.Println(link, sum)
 		return nil
 	case "bump":
 		added, err := pipeline.Bump(ctx, c, pipeline.Upstream)

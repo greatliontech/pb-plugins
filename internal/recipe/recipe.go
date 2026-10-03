@@ -1,9 +1,11 @@
 // Package recipe builds a plugin's platform trees: for each platform
-// asked, a directory holding the entrypoint executable at its root,
-// laid out as out/<os>-<arch>/<entrypoint>, the shape `pb plugin
-// build` packages. Each kind of the catalog has its builder here; a
-// native kind builds only the host's platform, the others every
-// platform asked from one host.
+// asked, a directory holding the plugin's process as the image's
+// argv names it — the entrypoint executable at its root for most
+// kinds, laid out as out/<os>-<arch>/<entrypoint>; a runtime beside
+// the program for the jvm kind — the shape `pb plugin build`
+// packages. Each kind of the catalog has its builder here; a native
+// kind builds only the host's platform, the others every platform
+// asked from one host.
 package recipe
 
 import (
@@ -93,6 +95,7 @@ var builders = map[catalog.Kind]builder{
 	catalog.KindRust:  buildRust,
 	catalog.KindSwift: buildSwift,
 	catalog.KindDart:  buildDart,
+	catalog.KindJvm:   buildJvm,
 }
 
 // command is a command in dir with the environment added to the
@@ -153,6 +156,16 @@ func fetchTag(ctx context.Context, p *catalog.Plugin, version, platform, prefix 
 // libraries alone (a toolchain's library reached through a search
 // path is absent on every other machine).
 func layDown(kind catalog.Kind, name, platform, built, dst string) error {
+	if err := holdExecutable(kind, name, platform, built); err != nil {
+		return err
+	}
+	return copyFile(built, dst)
+}
+
+// holdExecutable holds an executable to layDown's rule for the
+// platform where it lies, for a kind whose launcher is linked in
+// place.
+func holdExecutable(kind catalog.Kind, name, platform, built string) error {
 	os, _ := catalog.SplitPlatform(platform)
 	var err error
 	switch os {
@@ -166,7 +179,7 @@ func layDown(kind catalog.Kind, name, platform, built, dst string) error {
 	if err != nil {
 		return fmt.Errorf("%s %s: %w", name, platform, err)
 	}
-	return copyFile(built, dst)
+	return nil
 }
 
 // checkStatic refuses an ELF executable that names an interpreter.
@@ -186,15 +199,19 @@ func checkStatic(path string) error {
 
 // checkPortable refuses a Mach-O executable, every architecture of a
 // universal one, that loads a library from anywhere but the system
-// (`/usr/lib`, `/System`): one named through `@rpath` or an
-// absolute path into a toolchain loads on the machine that built it
-// alone. Every load command naming a library counts — the weak ones
-// too, which is how a toolchain's compatibility library is bound.
-// The rule is no search-path binding at all, not "unresolvable": a
-// back-deployed runtime library bound through `@rpath` with
-// `/usr/lib/swift` among the search paths would load on a recent
-// macOS, and is refused here all the same; the remedy is a
-// deployment target the system's runtime serves, not a looser rule.
+// (`/usr/lib`, `/System/Library`, the darwin row's substrate) or the
+// image itself — a binding or a run
+// path through `@executable_path` or `@loader_path`, which a bundled
+// runtime's launcher uses for its own libraries — as the darwin
+// sandbox row admits: a library named through `@rpath` with no
+// image-relative run path, or an absolute path into a toolchain,
+// loads on the machine that built it alone. Every load command
+// naming a library counts — the weak ones too, which is how a
+// toolchain's compatibility library is bound. A back-deployed
+// runtime library bound through `@rpath` with `/usr/lib/swift` among
+// absolute run paths alone would load on a recent macOS, and is
+// refused here all the same; the remedy is a deployment target the
+// system's runtime serves, not a looser rule.
 func checkPortable(path string) error {
 	var files []*macho.File
 	if fat, err := macho.OpenFat(path); err == nil {
@@ -211,23 +228,48 @@ func checkPortable(path string) error {
 		files = append(files, f)
 	}
 	for _, f := range files {
-		libs, err := loadedLibraries(f)
+		libs, rpaths, err := loadedLibraries(f)
 		if err != nil {
 			return err
 		}
+		relative := false
+		for _, rp := range rpaths {
+			if imageRelative(rp) {
+				relative = true
+			} else if !substrate(rp) {
+				return fmt.Errorf("searches %s: a darwin tree's run paths are the system's or relative to the image", rp)
+			}
+		}
 		for _, lib := range libs {
-			if !strings.HasPrefix(lib, "/usr/lib/") && !strings.HasPrefix(lib, "/System/") {
-				return fmt.Errorf("loads %s: a darwin tree binds to the system's libraries alone", lib)
+			switch {
+			case substrate(lib), imageRelative(lib):
+			case strings.HasPrefix(lib, "@rpath/") && relative:
+			default:
+				return fmt.Errorf("loads %s: a darwin tree binds to the system's libraries or its own alone", lib)
 			}
 		}
 	}
 	return nil
 }
 
+// imageRelative reports whether a binding or run path resolves
+// relative to the image: through the executable's or the loading
+// library's own location.
+func imageRelative(p string) bool {
+	return strings.HasPrefix(p, "@executable_path/") || strings.HasPrefix(p, "@loader_path/")
+}
+
+// substrate reports whether a path lies in the darwin row's
+// execution substrate, the system's libraries and frameworks.
+func substrate(p string) bool {
+	return strings.HasPrefix(p, "/usr/lib/") || strings.HasPrefix(p, "/System/Library/")
+}
+
 // dylibCommands are the load commands that bind a library: the
 // plain one debug/macho reads for us and the weak, re-exported,
 // lazy and upward ones it leaves as bytes, all of one layout, the
-// library's name at the offset the command's third word gives.
+// library's name at the offset the command's third word gives; an
+// rpath command names a run path the same way.
 var dylibCommands = map[macho.LoadCmd]bool{
 	macho.LoadCmdDylib: true,
 	0x80000018:         true, // LC_LOAD_WEAK_DYLIB
@@ -236,16 +278,28 @@ var dylibCommands = map[macho.LoadCmd]bool{
 	0x80000023:         true, // LC_LOAD_UPWARD_DYLIB
 }
 
+// rpathCommand names a run path (LC_RPATH), its path at the offset
+// the command's third word gives, past its twelve fixed bytes;
+// dyldEnvironmentCommand (LC_DYLD_ENVIRONMENT) sets a loader
+// variable, which the darwin row refuses outright.
+const (
+	rpathCommand           macho.LoadCmd = 0x8000001c
+	dyldEnvironmentCommand macho.LoadCmd = 0x27
+)
+
 // loadedLibraries names every library a Mach-O file's load commands
-// bind, weakly or not; a binding whose name cannot be read — the
-// command too short, or the name's offset outside it or inside its
-// fixed words — is refused, an unknown library being no library the
-// gate can admit.
-func loadedLibraries(f *macho.File) ([]string, error) {
-	var libs []string
+// bind, weakly or not, and every run path they name; a binding or
+// run path whose name cannot be read — the command too short, or
+// the name's offset outside it or inside its fixed words — is
+// refused, an unknown library being no library the gate can admit.
+func loadedLibraries(f *macho.File) (libs, rpaths []string, err error) {
 	for _, l := range f.Loads {
 		if d, ok := l.(*macho.Dylib); ok {
 			libs = append(libs, d.Name)
+			continue
+		}
+		if r, ok := l.(*macho.Rpath); ok {
+			rpaths = append(rpaths, r.Path)
 			continue
 		}
 		raw := l.Raw()
@@ -253,23 +307,33 @@ func loadedLibraries(f *macho.File) ([]string, error) {
 			continue
 		}
 		cmd := macho.LoadCmd(f.ByteOrder.Uint32(raw))
-		if !dylibCommands[cmd] {
+		if cmd == dyldEnvironmentCommand {
+			return nil, nil, errors.New("sets a loader environment: a darwin tree sets none")
+		}
+		fixed := 24
+		if cmd == rpathCommand {
+			fixed = 12
+		} else if !dylibCommands[cmd] {
 			continue
 		}
-		if len(raw) < 24 {
-			return nil, fmt.Errorf("a library binding (command %#x) names no readable library", uint32(cmd))
+		if len(raw) < fixed {
+			return nil, nil, fmt.Errorf("a library binding (command %#x) names no readable library", uint32(cmd))
 		}
 		off := int(f.ByteOrder.Uint32(raw[8:]))
-		if off < 24 || off >= len(raw) {
-			return nil, fmt.Errorf("a library binding (command %#x) names no readable library", uint32(cmd))
+		if off < fixed || off >= len(raw) {
+			return nil, nil, fmt.Errorf("a library binding (command %#x) names no readable library", uint32(cmd))
 		}
 		name := raw[off:]
 		if i := bytes.IndexByte(name, 0); i >= 0 {
 			name = name[:i]
 		}
-		libs = append(libs, string(name))
+		if cmd == rpathCommand {
+			rpaths = append(rpaths, string(name))
+		} else {
+			libs = append(libs, string(name))
+		}
 	}
-	return libs, nil
+	return libs, rpaths, nil
 }
 
 // copyFile writes src's bytes to dst, creating dst's directory.

@@ -5,12 +5,14 @@ import (
 	"archive/zip"
 	"compress/gzip"
 	"context"
+	"crypto/sha1"
 	"crypto/sha256"
 	"debug/elf"
 	"debug/macho"
 	"debug/pe"
 	"encoding/hex"
 	"fmt"
+	"hash"
 	"io"
 	"os"
 	"path"
@@ -166,26 +168,31 @@ func download(ctx context.Context, url string) (*os.File, int64, error) {
 // beside the asset: `sha256`, at the asset's URL with `.sha256`
 // appended, the hex digest the first word of the file.
 func verify(ctx context.Context, f *os.File, url, checksum string) error {
-	if checksum != "sha256" {
-		return fmt.Errorf("checksum %q is none of sha256", checksum)
+	var h hash.Hash
+	switch checksum {
+	case "sha256":
+		h = sha256.New()
+	case "sha1":
+		h = sha1.New()
+	default:
+		return fmt.Errorf("checksum %q is none of sha256, sha1", checksum)
 	}
-	published, err := web.Get(ctx, url+".sha256", nil)
+	published, err := web.Get(ctx, url+"."+checksum, nil)
 	if err != nil {
 		return err
 	}
 	fields := strings.Fields(string(published))
 	if len(fields) == 0 {
-		return fmt.Errorf("%s.sha256: empty", url)
+		return fmt.Errorf("%s.%s: empty", url, checksum)
 	}
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
-	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
 		return err
 	}
 	if got := hex.EncodeToString(h.Sum(nil)); !strings.EqualFold(got, fields[0]) {
-		return fmt.Errorf("%s: sha256 %s, upstream publishes %s", url, got, fields[0])
+		return fmt.Errorf("%s: %s %s, upstream publishes %s", url, checksum, got, fields[0])
 	}
 	return nil
 }

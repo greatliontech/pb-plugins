@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha1"
 	"crypto/sha256"
 	"debug/elf"
 	"debug/macho"
@@ -21,7 +22,9 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/greatliontech/pb-plugins/internal/catalog"
 	"github.com/greatliontech/pb-plugins/internal/endpoints"
@@ -165,13 +168,17 @@ func machoOf(cpu macho.Cpu) []byte {
 // machoLoading is machoOf with one LC_LOAD_DYLIB command per
 // library named; a name prefixed `weak:` is bound by
 // LC_LOAD_WEAK_DYLIB instead, its name at an offset past the
-// command's fixed words, as the offset word allows.
+// command's fixed words, as the offset word allows; one prefixed
+// `rpath:` is an LC_RPATH run path.
 func machoLoading(cpu macho.Cpu, libs ...string) []byte {
 	var cmds []byte
 	for _, lib := range libs {
 		kind, off := uint32(macho.LoadCmdDylib), 24
 		if strings.HasPrefix(lib, "weak:") {
 			kind, lib, off = 0x80000018, strings.TrimPrefix(lib, "weak:"), 32
+		}
+		if strings.HasPrefix(lib, "rpath:") {
+			kind, lib, off = 0x8000001c, strings.TrimPrefix(lib, "rpath:"), 12
 		}
 		name := append([]byte(lib), 0)
 		for len(name)%8 != 0 {
@@ -517,7 +524,7 @@ func TestGoKindFromATagLive(t *testing.T) {
 
 // The release kind reads beyond GitHub releases: grpc/java's
 // executable from Maven Central, its sha256 verified, grpc/node's
-// from grpc's binary host and ScalaPB's from its GitHub release,
+// from grpc's binary host,
 // every platform each serves built from this host (network). Runs
 // where PBPLUGINS_LIVE is set.
 func TestReleaseSourcesLive(t *testing.T) {
@@ -528,7 +535,7 @@ func TestReleaseSourcesLive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for name, version := range map[string]string{"grpc/java": "v1.84.0", "grpc/node": "v1.13.1", "community/scalapb-scala": "v0.11.17"} {
+	for name, version := range map[string]string{"grpc/java": "v1.84.0", "grpc/node": "v1.13.1"} {
 		out := t.TempDir()
 		platforms := c.Plugins[name].PlatformsOf()
 		if err := Build(context.Background(), c, name, version, platforms, out); err != nil {
@@ -943,6 +950,40 @@ func TestCheckPortable(t *testing.T) {
 	if err := checkPortable(write("weak-system", weakSystem)); err != nil {
 		t.Errorf("a weak binding to the system: %v", err)
 	}
+	// A bundled runtime's launcher binds its own libraries relative
+	// to the image: an @rpath binding with an @executable_path run
+	// path, or a binding through @loader_path, is admitted; an
+	// @rpath binding whose run paths are absolute and foreign, or a
+	// foreign absolute run path itself, is refused.
+	bundled := machoLoading(macho.CpuArm64, "/usr/lib/libSystem.B.dylib", "rpath:@executable_path/../lib", "@rpath/libjli.dylib")
+	if err := checkPortable(write("bundled", bundled)); err != nil {
+		t.Errorf("a runtime bound relative to the image: %v", err)
+	}
+	loader := machoLoading(macho.CpuArm64, "@loader_path/libjvm.dylib")
+	if err := checkPortable(write("loader", loader)); err != nil {
+		t.Errorf("a loader-relative binding: %v", err)
+	}
+	foreignRpath := machoLoading(macho.CpuArm64, "rpath:/Library/Developer/Toolchains/x/usr/lib", "@rpath/libswift_Concurrency.dylib")
+	if err := checkPortable(write("foreign-rpath", foreignRpath)); err == nil || !strings.Contains(err.Error(), "searches /Library/Developer/Toolchains") {
+		t.Errorf("a foreign run path: %v", err)
+	}
+	systemRpath := machoLoading(macho.CpuArm64, "rpath:/usr/lib/swift", "@rpath/libswift_Concurrency.dylib")
+	if err := checkPortable(write("system-rpath", systemRpath)); err == nil || !strings.Contains(err.Error(), "@rpath/libswift_Concurrency.dylib") {
+		t.Errorf("an @rpath binding with the system's run path alone: %v", err)
+	}
+	// The substrate is the system's libraries and frameworks, not
+	// everything under /System; a loader environment is refused.
+	volumes := machoLoading(macho.CpuArm64, "rpath:/System/Volumes/Data/x", "/usr/lib/libSystem.B.dylib")
+	if err := checkPortable(write("volumes", volumes)); err == nil || !strings.Contains(err.Error(), "searches /System/Volumes/Data/x") {
+		t.Errorf("a run path under /System outside the substrate: %v", err)
+	}
+	env := machoOf(macho.CpuArm64)
+	env = append(env, 0x27, 0, 0, 0, 24, 0, 0, 0, 12, 0, 0, 0, 'D', 'Y', 'L', 'D', '_', 'X', '=', '1', 0, 0, 0, 0)
+	binary.LittleEndian.PutUint32(env[16:], 1)
+	binary.LittleEndian.PutUint32(env[20:], 24)
+	if err := checkPortable(write("env", env)); err == nil || !strings.Contains(err.Error(), "sets a loader environment") {
+		t.Errorf("a loader environment: %v", err)
+	}
 	// A binding whose name cannot be read is refused, not passed over.
 	malformed := machoLoading(macho.CpuArm64, "weak:/usr/lib/libSystem.B.dylib")
 	binary.LittleEndian.PutUint32(malformed[32+8:], 0xffff) // the name's offset, outside the command
@@ -1130,6 +1171,302 @@ func TestTagKindsLive(t *testing.T) {
 		if built != served || served < floors[kind] {
 			t.Errorf("%s: %d of %d versions serving this host built, the floor here %d", kind, built, served, floors[kind])
 		}
+	}
+}
+
+// A jvm build fetches the JDK of the pinned release for each
+// platform from Adoptium at the checksum it publishes, once per
+// platform under the cache, links a runtime from its modules, lays
+// the launcher down under its bare name, fetches the jar from Maven
+// at its coordinates held to the sha1 Maven publishes, and probes
+// the host's tree as the image runs it; jlink here a script laying
+// the fake plugin down as the launcher.
+func TestBuildJvm(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("jlink is a shell script here")
+	}
+	jdk := tarGz(t, map[string]string{"jdk-21.0.12.1+1/jmods/java.base.jmod": "jmod"}, nil)
+	jdkZip := zipped(t, map[string]string{"jdk-21.0.12.1+1/jmods/java.base.jmod": "jmod"})
+	jdkSum := sha256Of(jdk)
+	jdkZipSum := sha256Of(jdkZip)
+	jar := []byte("PK the jar")
+	var mu sync.Mutex
+	fetched := map[string]int{}
+	count := func(path string) int {
+		mu.Lock()
+		defer mu.Unlock()
+		return fetched[path]
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		fetched[r.URL.Path]++
+		mu.Unlock()
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/v3/assets/release_name/eclipse/jdk-21.0.12.1+1"):
+			if r.URL.Query().Get("architecture") == "" {
+				fmt.Fprintf(w, `{"binaries":[{"package":{"link":"http://%s/x.tar.gz","checksum":"../escape"}}]}`, r.Host)
+				return
+			}
+			if !strings.Contains(r.Header.Get("User-Agent"), "pb-plugins") {
+				http.Error(w, "name yourself", http.StatusForbidden)
+				return
+			}
+			q := r.URL.Query()
+			if q.Get("os") == "windows" {
+				fmt.Fprintf(w, `{"binaries":[{"package":{"link":"http://%s/jdk-%s-%s.zip","checksum":%q}}]}`, r.Host, q.Get("os"), q.Get("architecture"), jdkZipSum)
+				return
+			}
+			fmt.Fprintf(w, `{"binaries":[{"package":{"link":"http://%s/jdk-%s-%s.tar.gz","checksum":%q}}]}`, r.Host, q.Get("os"), q.Get("architecture"), jdkSum)
+		case strings.HasSuffix(r.URL.Path, ".tar.gz"):
+			w.Write(jdk)
+		case strings.HasSuffix(r.URL.Path, ".zip"):
+			w.Write(jdkZip)
+		case r.URL.Path == "/g/h/a/1.0.0/a-1.0.0-c.jar":
+			w.Write(jar)
+		case r.URL.Path == "/g/h/a/1.0.0/a-1.0.0-c.jar.sha1":
+			fmt.Fprint(w, sha1Of(jar))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	for _, ep := range []*string{&endpoints.Adoptium, &endpoints.Maven} {
+		saved := *ep
+		*ep = srv.URL
+		defer func() { *ep = saved }()
+	}
+	savedCache := jdkCache
+	jdkCache = t.TempDir()
+	defer func() { jdkCache = savedCache }()
+	exe := fakePlugin(t)
+	t.Setenv("PROBE_MODE", "file")
+	bin := t.TempDir()
+	log := filepath.Join(bin, "log")
+	// jlink records its arguments and lays the launcher and the
+	// spawner down under the output: the fake plugin for the host,
+	// a darwin launcher fixture for a darwin output (bound to the
+	// system and, through an image-relative run path, its own
+	// libraries, as a runtime's is).
+	// Temurin's launcher as it is bound: libjli through @rpath with
+	// loader-relative run paths, the system's frameworks and libSystem.
+	darwinLauncher := filepath.Join(bin, "java-darwin")
+	if err := os.WriteFile(darwinLauncher, machoLoading(macho.CpuArm64, "@rpath/libjli.dylib", "/System/Library/Frameworks/Cocoa.framework/Versions/A/Cocoa", "/System/Library/Frameworks/Security.framework/Versions/A/Security", "/usr/lib/libSystem.B.dylib", "rpath:@loader_path/.", "rpath:@loader_path/../lib"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A windows runtime's launcher comes out of jlink as java.exe.
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + log + "\nwhile [ $# -gt 0 ]; do if [ \"$1\" = --output ]; then out=$2; fi; shift; done\nmkdir -p \"$out/bin\" \"$out/lib\"\ncase \"$out\" in *darwin-*) cp " + darwinLauncher + " \"$out/bin/java\";; *windows-*) cp " + exe + " \"$out/bin/java.exe\";; *) cp " + exe + " \"$out/bin/java\";; esac\nprintf x > \"$out/lib/jspawnhelper\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "jlink"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	platforms := []string{Host(), "windows/arm64", "darwin/arm64"}
+	if runtime.GOOS == "darwin" {
+		platforms = []string{Host(), "windows/arm64"}
+	}
+	c := &catalog.Catalog{Toolchains: map[string]string{"jvm": "21.0.12.1+1"}, Plugins: map[string]*catalog.Plugin{"a/b": {Kind: catalog.KindJvm, Maven: "g.h:a", Classifier: "c", Checksum: "sha1", Entrypoint: "e", Platforms: platforms}}}
+	out := t.TempDir()
+	if err := Build(context.Background(), c, "a/b", "v1.0.0", platforms, out); err != nil {
+		t.Fatal(err)
+	}
+	for _, pl := range platforms {
+		tree := TreeDir(out, pl)
+		if b, err := os.ReadFile(filepath.Join(tree, "e.jar")); err != nil || string(b) != string(jar) {
+			t.Errorf("%s: the jar: %v", pl, err)
+		}
+		// The launcher under its bare name on every platform, the
+		// windows one renamed from java.exe.
+		if fi, err := os.Stat(filepath.Join(tree, "jre", "bin", "java")); err != nil || fi.Size() == 0 {
+			t.Errorf("%s: the launcher: %v", pl, err)
+		}
+		if _, err := os.Stat(filepath.Join(tree, "jre", "bin", "java.exe")); err == nil {
+			t.Errorf("%s: java.exe left beside the launcher", pl)
+		}
+	}
+	calls, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(calls)), "\n")
+	if len(lines) != len(platforms) || !strings.Contains(lines[0], "--add-modules "+strings.Join(catalog.JvmModules, ",")+" --strip-java-debug-attributes --no-header-files --no-man-pages --compress zip-6 --output "+filepath.Join(TreeDir(out, Host()), "jre")) || !strings.Contains(lines[0], "--module-path "+filepath.Join(jdkCache, "21.0.12.1+1", strings.ReplaceAll(Host(), "/", "-"))) {
+		t.Errorf("jlink's calls: %q", lines)
+	}
+	if count("/g/h/a/1.0.0/a-1.0.0-c.jar") != 1 {
+		t.Errorf("the jar fetched %d times", count("/g/h/a/1.0.0/a-1.0.0-c.jar"))
+	}
+	// A second build finds the JDKs in the cache under their
+	// checksums; an extraction left beside its place, never moved
+	// in, is no hit, and the JDK lies under the checksum alone.
+	hostJDK := "/jdk-" + map[string]string{"linux": "linux", "darwin": "mac"}[runtime.GOOS] + "-" + map[string]string{"amd64": "x64", "arm64": "aarch64"}[runtime.GOARCH] + ".tar.gz"
+	if err := Build(context.Background(), c, "a/b", "v1.0.0", []string{Host()}, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if count(hostJDK) != 1 {
+		t.Errorf("the JDK fetched %d times after a hit", count(hostJDK))
+	}
+	if _, err := os.Stat(filepath.Join(jdkCache, "21.0.12.1+1", strings.ReplaceAll(Host(), "/", "-"), jdkSum, "jdk-21.0.12.1+1", "jmods")); err != nil {
+		t.Errorf("the JDK's place under its checksum: %v", err)
+	}
+	if torn, err := filepath.Glob(filepath.Join(jdkCache, "21.0.12.1+1", "*", ".extract-*")); err != nil || len(torn) != 0 {
+		t.Errorf("extractions left beside their place: %v %v", torn, err)
+	}
+	// An extraction a killed build left beside is swept on a miss
+	// once it is old; one in progress (young) is left alone.
+	beside := filepath.Join(jdkCache, "21.0.12.1+1", strings.ReplaceAll(Host(), "/", "-"))
+	stale, young := filepath.Join(beside, ".extract-stale"), filepath.Join(beside, ".extract-young")
+	for _, d := range []string{stale, young} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-3 * time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+	os.RemoveAll(filepath.Join(beside, jdkSum))
+	if err := Build(context.Background(), c, "a/b", "v1.0.0", []string{Host()}, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(stale); err == nil {
+		t.Error("a stale extraction left beside the cache")
+	}
+	if _, err := os.Stat(young); err != nil {
+		t.Error("an extraction in progress beside the cache swept")
+	}
+	// A darwin launcher bound through a search path no run path of
+	// the image resolves is held where it lies and refused.
+	if runtime.GOOS != "darwin" {
+		if err := os.WriteFile(darwinLauncher, machoLoading(macho.CpuArm64, "/usr/lib/libSystem.B.dylib", "rpath:/Library/Java/lib", "@rpath/libjli.dylib"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := Build(context.Background(), c, "a/b", "v1.0.0", []string{"darwin/arm64"}, t.TempDir()); err == nil || !strings.Contains(err.Error(), "a/b darwin/arm64") || !strings.Contains(err.Error(), "searches /Library/Java/lib") {
+			t.Errorf("a darwin launcher bound to a foreign run path: %v", err)
+		}
+	}
+	// A checksum of no sha256's shape names no cache directory.
+	if _, _, err := JDKAsset(context.Background(), "21.0.12.1+1", "linux/shaped"); err == nil || !strings.Contains(err.Error(), "no one asset with a sha256") {
+		t.Errorf("a checksum of another shape: %v", err)
+	}
+	// A jar whose digest disagrees with Maven's is refused.
+	c.Plugins["a/b"].Classifier = "d"
+	srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "-d.jar"):
+			w.Write([]byte("other bytes"))
+		case strings.HasSuffix(r.URL.Path, "-d.jar.sha1"):
+			fmt.Fprint(w, sha1Of(jar))
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	if err := Build(context.Background(), c, "a/b", "v1.0.0", []string{Host()}, t.TempDir()); err == nil || !strings.Contains(err.Error(), "sha1") {
+		t.Errorf("a jar disagreeing with Maven's digest: %v", err)
+	}
+}
+
+// sha256Of and sha1Of are the hex digests of bytes.
+func sha256Of(b []byte) string { h := sha256.Sum256(b); return hex.EncodeToString(h[:]) }
+func sha1Of(b []byte) string   { h := sha1.Sum(b); return hex.EncodeToString(h[:]) }
+
+// A JDK archive extracts whole under a directory, its modes kept and
+// an entry escaping the directory refused; its jmods directory is
+// found at any depth.
+func TestJDKArchives(t *testing.T) {
+	dir := t.TempDir()
+	tgz := bytes.NewReader(tarGz(t, map[string]string{"jdk/Contents/Home/jmods/java.base.jmod": "j", "jdk/bin/": "", "jdk/bin/java": "x"}, nil))
+	if err := untarInto(tgz, filepath.Join(dir, "t")); err != nil {
+		t.Fatal(err)
+	}
+	if jm, err := findDir(filepath.Join(dir, "t"), "jmods"); err != nil || !strings.HasSuffix(jm, filepath.Join("Contents", "Home", "jmods")) {
+		t.Errorf("the jmods: %s %v", jm, err)
+	}
+	zf, err := os.CreateTemp(dir, "z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	zf.Write(zipped(t, map[string]string{"jdk/jmods/java.base.jmod": "j"}))
+	if err := unzipInto(zf, filepath.Join(dir, "z")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := findDir(filepath.Join(dir, "z"), "jmods"); err != nil {
+		t.Errorf("the zip's jmods: %v", err)
+	}
+	if _, err := findDir(filepath.Join(dir, "z"), "nothing"); err == nil {
+		t.Error("a directory not in the archive found")
+	}
+	escaping := bytes.NewReader(tarGz(t, map[string]string{"../escape": "x"}, nil))
+	if err := untarInto(escaping, filepath.Join(dir, "e")); err == nil || !strings.Contains(err.Error(), "outside the directory") {
+		t.Errorf("an escaping entry: %v", err)
+	}
+}
+
+// The probe runs a tree's argv as a runner does: the program
+// resolved in the tree, the arguments as spelled, the tree the
+// working directory, so a jar named relative to the root is found.
+func TestProbeArgv(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the launcher is a shell script here")
+	}
+	tree := t.TempDir()
+	exe := fakePlugin(t)
+	t.Setenv("PROBE_MODE", "file")
+	// A launcher that refuses to run unless its jar lies in the
+	// working directory, then answers as the fake plugin.
+	if err := os.MkdirAll(filepath.Join(tree, "jre", "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\n[ \"$1\" = -jar ] && [ -f \"$2\" ] || { echo \"no jar $2 in $PWD\" >&2; exit 3; }\nexec " + exe + "\n"
+	if err := os.WriteFile(filepath.Join(tree, "jre", "bin", "java"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tree, "e.jar"), []byte("jar"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := ProbeArgv(context.Background(), tree, []string{"/jre/bin/java", "-jar", "e.jar"}, "", false); err != nil {
+		t.Errorf("the argv in the tree: %v", err)
+	}
+	if err := ProbeArgv(context.Background(), tree, []string{"/jre/bin/java", "-jar", "missing.jar"}, "", false); err == nil || !strings.Contains(err.Error(), "no jar missing.jar") {
+		t.Errorf("a jar the tree lacks: %v", err)
+	}
+}
+
+// The jvm kind builds grpc/kotlin for every platform from this host
+// and every other jvm plugin for the host, at the versions the
+// catalog holds, each probed (network: Adoptium, Maven Central; the
+// pinned JDK's jlink). Runs where PBPLUGINS_LIVE is set.
+func TestJvmKindLive(t *testing.T) {
+	if os.Getenv("PBPLUGINS_LIVE") == "" {
+		t.Skip("PBPLUGINS_LIVE unset")
+	}
+	c, err := catalog.Load("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	built := 0
+	for _, name := range c.Names() {
+		p := c.Plugins[name]
+		if p.Kind != catalog.KindJvm {
+			continue
+		}
+		platforms := []string{Host()}
+		if name == "grpc/kotlin" {
+			platforms = p.PlatformsOf()
+		}
+		for _, version := range p.Versions {
+			out := t.TempDir()
+			if err := Build(context.Background(), c, name, version, platforms, out); err != nil {
+				t.Errorf("%s %s: %v", name, version, err)
+				continue
+			}
+			for _, pl := range platforms {
+				if fi, err := os.Stat(filepath.Join(TreeDir(out, pl), "jre", "bin", "java")); err != nil || fi.Size() == 0 {
+					t.Errorf("%s %s %s: the launcher: %v", name, version, pl, err)
+				}
+			}
+			built++
+		}
+	}
+	if built < 8 {
+		t.Errorf("%d jvm plugin versions built, the catalog holding eight at least", built)
 	}
 }
 

@@ -5,7 +5,10 @@
 # URL and checksum swift.org publishes for the release, read by
 # `catalog sdk`, held equal to the catalog's pin); dart from
 # Google's archive (the SDK's zip for the runner's platform, held to
-# the checksum published beside it). The versions and targets are
+# the checksum published beside it); jvm from Adoptium (the pinned
+# Temurin release's JDK for the runner's platform, held to the
+# sha256 Adoptium publishes, its jlink the one that links every
+# platform's runtime from that release's modules). The versions and targets are
 # the catalog's, read here, so a runner installs what the catalog at
 # this commit names.
 name: toolchain
@@ -82,6 +85,27 @@ runs:
           if [ "$RUNNER_OS" = Windows ]; then /c/Windows/System32/tar.exe -xf "$zip"; else unzip -q "$zip"; fi
           echo "$RUNNER_TEMP/dart-sdk/bin" >> "$GITHUB_PATH"
           "$RUNNER_TEMP/dart-sdk/bin/dart" --version
+          ;;
+        jvm)
+          # The host's JDK as the catalog reads it from Adoptium: the
+          # one source the build's cross links use for every platform.
+          jdk=$(go run ./cmd/catalog jdk "$kind")
+          read -r link want <<<"$jdk"
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o jdk-archive "$link"
+          if [ "$RUNNER_OS" = macOS ]; then got=$(shasum -a 256 jdk-archive | cut -d' ' -f1); else got=$(sha256sum jdk-archive | cut -d' ' -f1); fi
+          if [ "$got" != "$want" ]; then echo "$link: sha256 $got, Adoptium publishes $want" >&2; exit 1; fi
+          mkdir -p jdk
+          case "$link" in
+          *.zip) /c/Windows/System32/tar.exe -xf jdk-archive -C jdk ;;
+          *) tar -xzf jdk-archive -C jdk ;;
+          esac
+          bin=$(find "$RUNNER_TEMP/jdk" -type d -name bin -path '*/bin' | grep -v '/jmods/' | head -1)
+          case "$RUNNER_OS" in
+          macOS) bin=$(find "$RUNNER_TEMP/jdk" -type d -path '*/Contents/Home/bin' | head -1) ;;
+          esac
+          echo "$bin" >> "$GITHUB_PATH"
+          "$bin/java" -version
           ;;
         *) echo "no toolchain is pinned for the $kind kind" >&2; exit 1 ;;
         esac

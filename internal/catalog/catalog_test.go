@@ -42,7 +42,7 @@ func write(t *testing.T, dir, catalogYAML string, versions map[string]string) {
 	}
 }
 
-var head = "registry: r.example/p\nbase: r.example/base@sha256:" + "ab" + "\ntoolchains:\n  rust: 1.98.1\n  swift: 6.4.0\n  dart: 3.13.5\nsdks:\n  swift: " + strings.Repeat("ab", 32) + "\nplugins:\n"
+var head = "registry: r.example/p\nbase: r.example/base@sha256:" + "ab" + "\ntoolchains:\n  rust: 1.98.1\n  swift: 6.4.0\n  dart: 3.13.5\n  jvm: 21.0.12.1+1\nsdks:\n  swift: " + strings.Repeat("ab", 32) + "\nplugins:\n"
 
 // Validate refuses each malformed shape naming the plugin and the
 // fault, and admits the well-formed ones, two-component versions
@@ -94,6 +94,13 @@ func TestValidate(t *testing.T) {
 		{"a line with a leading zero", "  a/b:\n    source: s\n    kind: swift\n    repository: o/r\n    tag: \"{version}\"\n    product: e\n    entrypoint: e\n    platforms: [linux/amd64]\n    line: v01\n", "v1.27.6\n", "no major version"},
 		{"a line that is no major", "  a/b:\n    source: s\n    kind: swift\n    repository: o/r\n    tag: \"{version}\"\n    product: e\n    entrypoint: e\n    platforms: [linux/amd64]\n    line: 1.x\n", "v1.27.6\n", "no major version"},
 		{"a version outside the line", "  a/b:\n    source: s\n    kind: swift\n    repository: o/r\n    tag: \"{version}\"\n    product: e\n    entrypoint: e\n    platforms: [linux/amd64]\n    line: v1\n", "v1.27.6\nv2.0.0\n", "outside the line v1"},
+		{"jvm ok", "  a/b:\n    source: s\n    kind: jvm\n    maven: g.h:a\n    classifier: c\n    extension: sh\n    checksum: sha1\n    modules: [java.base, jdk.unsupported]\n    entrypoint: e\n    platforms: [linux/amd64, windows/arm64]\n", "v1.0.0\n", ""},
+		{"jvm without maven", "  a/b:\n    source: s\n    kind: jvm\n    checksum: sha256\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", "maven group:artifact required"},
+		{"jvm without checksum", "  a/b:\n    source: s\n    kind: jvm\n    maven: g:a\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", "checksum sha256 or sha1 required"},
+		{"jvm checksum of another kind", "  a/b:\n    source: s\n    kind: jvm\n    maven: g:a\n    checksum: md5\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", "checksum sha256 or sha1 required"},
+		{"jvm module name", "  a/b:\n    source: s\n    kind: jvm\n    maven: g:a\n    checksum: sha1\n    modules: [\"java base\"]\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", "no module name"},
+		{"jvm classifier path", "  a/b:\n    source: s\n    kind: jvm\n    maven: g:a\n    classifier: a/b\n    checksum: sha1\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", "no bare name"},
+		{"jvm foreign field", "  a/b:\n    source: s\n    kind: jvm\n    maven: g:a\n    checksum: sha1\n    crate: c\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", "a field of another kind"},
 		{"dart ok", "  a/b:\n    source: s\n    kind: dart\n    repository: o/r\n    tag: p-v{version}\n    dir: packages/p\n    main: bin/m.dart\n    entrypoint: e\n    platforms: [linux/amd64, windows/arm64]\n", "v1.0.0\n", ""},
 		{"dart at the root", "  a/b:\n    source: s\n    kind: dart\n    repository: o/r\n    tag: v{version}\n    dir: .\n    main: bin/m.dart\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", ""},
 		{"dart without dir", "  a/b:\n    source: s\n    kind: dart\n    repository: o/r\n    tag: v{version}\n    main: bin/m.dart\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", "no relative directory"},
@@ -197,16 +204,48 @@ func TestExpandAndPlatforms(t *testing.T) {
 // The bazel, rust, swift and dart kinds build on the platform itself; the
 // others cross-build from one host.
 func TestNative(t *testing.T) {
-	for k, want := range map[Kind]bool{KindGo: false, KindNode: false, KindRelease: false, KindBazel: true, KindRust: true, KindSwift: true, KindDart: true} {
+	for k, want := range map[Kind]bool{KindGo: false, KindNode: false, KindRelease: false, KindBazel: true, KindRust: true, KindSwift: true, KindDart: true, KindJvm: false} {
 		if got := k.Native(); got != want {
 			t.Errorf("%s native: %v, want %v", k, got, want)
 		}
 	}
 }
 
+// The image's process per kind: one executable at the root, the jvm
+// kind's java over the jar named relative to the root, processes
+// forked rather than spawned through the helper; the jar named by
+// the artifact, version, classifier and extension; the modules the
+// kind's unless the recipe names its own.
+func TestArgvAndJar(t *testing.T) {
+	p := &Plugin{Kind: KindGo, Entrypoint: "protoc-gen-x"}
+	if got := strings.Join(p.Argv(), " "); got != "/protoc-gen-x" {
+		t.Errorf("a go recipe's process: %q", got)
+	}
+	j := &Plugin{Kind: KindJvm, Entrypoint: "protoc-gen-scala", Maven: "com.thesamet.scalapb:protoc-gen-scala", Classifier: "unix", Extension: "sh"}
+	if got := strings.Join(j.Argv(), " "); got != "/jre/bin/java -Djdk.lang.Process.launchMechanism=FORK -jar protoc-gen-scala.jar" {
+		t.Errorf("a jvm recipe's process: %q", got)
+	}
+	if got := j.JarFile("v0.11.20"); got != "protoc-gen-scala-0.11.20-unix.sh" {
+		t.Errorf("the jar's name: %q", got)
+	}
+	k := &Plugin{Kind: KindJvm, Entrypoint: "protoc-gen-grpc-kotlin", Maven: "io.grpc:protoc-gen-grpc-kotlin", Classifier: "jdk8"}
+	if got := k.JarFile("v1.5.0"); got != "protoc-gen-grpc-kotlin-1.5.0-jdk8.jar" {
+		t.Errorf("the jar's name with a classifier: %q", got)
+	}
+	if got := (&Plugin{Kind: KindJvm, Maven: "g:a"}).JarFile("v2.0.0"); got != "a-2.0.0.jar" {
+		t.Errorf("the plain jar's name: %q", got)
+	}
+	if got := strings.Join(k.JvmModules(), ","); got != strings.Join(JvmModules, ",") {
+		t.Errorf("the kind's modules: %q", got)
+	}
+	if got := strings.Join((&Plugin{Kind: KindJvm, Modules: []string{"java.base"}}).JvmModules(), ","); got != "java.base" {
+		t.Errorf("the recipe's modules: %q", got)
+	}
+}
+
 // The catalog's kinds are known; another name is not.
 func TestKnown(t *testing.T) {
-	for _, k := range []Kind{KindGo, KindNode, KindRelease, KindBazel, KindRust, KindSwift, KindDart} {
+	for _, k := range []Kind{KindGo, KindNode, KindRelease, KindBazel, KindRust, KindSwift, KindDart, KindJvm} {
 		if !k.Known() {
 			t.Errorf("%s unknown", k)
 		}
@@ -232,6 +271,8 @@ func TestToolchainsPinned(t *testing.T) {
 		{"swift unpinned", "toolchains:\n  rust: 1.98.1\n" + sdk, "a swift recipe needs the swift toolchain pinned"},
 		{"swift pinned", "toolchains:\n  swift: 6.4.0\n" + sdk, ""},
 		{"a floating pin", "toolchains:\n  swift: \"6.3\"\n" + sdk, "is no release number"},
+		{"a jvm pin without its build number", "toolchains:\n  swift: 6.4.0\n  jvm: 21.0.12.1\n" + sdk, "is no release number"},
+		{"a jvm pin as Temurin names it", "toolchains:\n  swift: 6.4.0\n  jvm: 21.0.12.1+1\n" + sdk, ""},
 		{"a kind the pipeline does not pin", "toolchains:\n  swift: 6.4.0\n  go: 1.25.0\n" + sdk, "names no kind the pipeline pins"},
 		{"swift's SDK unpinned", "toolchains:\n  swift: 6.4.0\n", "a swift recipe needs the swift SDK's checksum pinned"},
 		{"an SDK pin that is no sha256", "toolchains:\n  swift: 6.4.0\nsdks:\n  swift: 47d2\n", "is no sha256"},
@@ -253,7 +294,7 @@ func TestToolchainsPinned(t *testing.T) {
 // base; the dart kind's links the C library and takes it, as every
 // other kind's may.
 func TestNeedsBase(t *testing.T) {
-	for k, want := range map[Kind]bool{KindGo: false, KindRust: false, KindSwift: false, KindNode: true, KindRelease: true, KindBazel: true, KindDart: true} {
+	for k, want := range map[Kind]bool{KindGo: false, KindRust: false, KindSwift: false, KindNode: true, KindRelease: true, KindBazel: true, KindDart: true, KindJvm: true} {
 		if got := k.NeedsBase(); got != want {
 			t.Errorf("%s needs a base: %v, want %v", k, got, want)
 		}

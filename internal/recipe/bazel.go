@@ -1,18 +1,13 @@
 package recipe
 
 import (
-	"archive/tar"
-	"compress/gzip"
 	"context"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"runtime"
-	"strings"
 
 	"github.com/greatliontech/pb-plugins/internal/catalog"
 )
@@ -89,10 +84,8 @@ func bazelArgs(p *catalog.Plugin, goos string) []string {
 	return append(args, p.Target)
 }
 
-// extractTarInto fetches a gzip-compressed tar and extracts its
-// regular files, directories and symbolic links under dir, the
-// leading strip components of every name dropped; an entry escaping
-// dir is refused.
+// extractTarInto fetches a gzip-compressed tar and extracts it into
+// dir with its leading path components stripped (untar).
 func extractTarInto(ctx context.Context, url string, strip int, dir string) error {
 	fmt.Fprintf(os.Stderr, "+ fetch %s\n", url)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -107,66 +100,7 @@ func extractTarInto(ctx context.Context, url string, strip int, dir string) erro
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("%s: %s", url, resp.Status)
 	}
-	gz, err := gzip.NewReader(resp.Body)
-	if err != nil {
-		return err
-	}
-	defer gz.Close()
-	tr := tar.NewReader(gz)
-	for {
-		h, err := tr.Next()
-		if err == io.EOF {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		name := path.Clean(h.Name)
-		parts := strings.Split(name, "/")
-		if len(parts) <= strip {
-			continue
-		}
-		rel := path.Join(parts[strip:]...)
-		if rel == "." || strings.HasPrefix(rel, "../") || path.IsAbs(rel) {
-			continue
-		}
-		target := filepath.Join(dir, filepath.FromSlash(rel))
-		switch h.Typeflag {
-		case tar.TypeDir:
-			if err := os.MkdirAll(target, 0o755); err != nil {
-				return err
-			}
-		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-				return err
-			}
-			mode := os.FileMode(0o644)
-			if h.FileInfo().Mode()&0o111 != 0 {
-				mode = 0o755
-			}
-			f, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
-			if err != nil {
-				return err
-			}
-			if _, err := io.Copy(f, tr); err != nil {
-				f.Close()
-				return err
-			}
-			if err := f.Close(); err != nil {
-				return err
-			}
-		case tar.TypeSymlink:
-			if path.IsAbs(h.Linkname) || strings.HasPrefix(path.Clean(path.Join(path.Dir(rel), h.Linkname)), "../") {
-				return fmt.Errorf("%s: link %s escapes the archive", url, name)
-			}
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-				return err
-			}
-			if err := os.Symlink(filepath.FromSlash(h.Linkname), target); err != nil {
-				return err
-			}
-		}
-	}
+	return untar(resp.Body, strip, dir)
 }
 
 // copyTree copies the regular files under from to the same paths

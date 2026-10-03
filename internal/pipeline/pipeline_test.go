@@ -40,13 +40,25 @@ func TestPlan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A cross job of a pinned kind carries the catalog's toolchain,
+	// one of another kind none.
+	crossKinds := map[string]bool{}
+	for _, cr := range plan.Cross.Include {
+		crossKinds[cr.Kind] = true
+		if cr.Toolchain != c.Toolchains[cr.Kind] {
+			t.Errorf("%s: toolchain %q, want the catalog's %q", cr.Tree, cr.Toolchain, c.Toolchains[cr.Kind])
+		}
+	}
+	if !crossKinds["jvm"] || !crossKinds["go"] {
+		t.Errorf("the plan's cross kinds: %v", crossKinds)
+	}
 	// A rust or swift tree carries the catalog's pinned toolchain; a
 	// bazel one none.
 	seen := map[string]bool{}
 	for _, tr := range plan.Trees.Include {
 		seen[tr.Kind] = true
 		switch pin := c.Toolchains[tr.Kind]; {
-		case (tr.Kind == "rust" || tr.Kind == "swift" || tr.Kind == "dart") && pin == "":
+		case (tr.Kind == "rust" || tr.Kind == "swift" || tr.Kind == "dart" || tr.Kind == "jvm") && pin == "":
 			t.Fatalf("the fixture pins no %s toolchain", tr.Kind)
 		case tr.Toolchain != pin:
 			t.Errorf("%s: toolchain %q, want the catalog's %q", tr.Tree, tr.Toolchain, pin)
@@ -279,6 +291,34 @@ func TestPublish(t *testing.T) {
 	}
 	delete(reg.tags, ref)
 
+	// A jvm plugin publishes with the image's argv, nothing marked
+	// executable beside its program, and the base on linux.
+	for _, pl := range c.Plugins["grpc/kotlin"].PlatformsOf() {
+		goos, arch, _ := strings.Cut(pl, "/")
+		d := filepath.Join(trees, goos+"-"+arch)
+		for _, f := range []string{filepath.Join(d, "jre", "bin", "java"), filepath.Join(d, "protoc-gen-grpc-kotlin.jar")} {
+			if err := os.MkdirAll(filepath.Dir(f), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(f, []byte("x"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	jvmRef := c.Reference("grpc/kotlin", "v1.5.0")
+	p.PB, pbLog = fakeTool(t, dir, "pb3", jvmRef+"@sha256:3333 unchanged\\n")
+	if err := p.Publish(context.Background(), "grpc/kotlin", "v1.5.0"); err != nil {
+		t.Fatal(err)
+	}
+	args = logOf(pbLog)
+	for _, want := range []string{"--entrypoint /jre/bin/java --entrypoint -Djdk.lang.Process.launchMechanism=FORK --entrypoint -jar --entrypoint protoc-gen-grpc-kotlin.jar", "--base linux/amd64=gcr.io/distroless/cc-debian13@sha256:linuxamd640000"} {
+		if !strings.Contains(string(args), want) {
+			t.Errorf("the jvm build's arguments lack %q: %q", want, args)
+		}
+	}
+	if strings.Contains(string(args), "--executable") {
+		t.Errorf("a file marked executable beside the program: %q", args)
+	}
 	// The go kind takes no base.
 	for _, pl := range c.Plugins["protocolbuffers/go"].PlatformsOf() {
 		goos, arch, _ := strings.Cut(pl, "/")
@@ -477,6 +517,26 @@ func TestUpstreamReleaseSources(t *testing.T) {
 	sort.Strings(vs)
 	if err != nil || strings.Join(vs, " ") != "v1.13.0 v1.13.1" {
 		t.Fatalf("npm: %v %v", vs, err)
+	}
+}
+
+// A jvm recipe discovers its versions through Maven's metadata, as a
+// release recipe naming a Maven artifact does.
+func TestUpstreamJvm(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/io/grpc/protoc-gen-grpc-kotlin/maven-metadata.xml" {
+			http.NotFound(w, r)
+			return
+		}
+		fmt.Fprint(w, `<metadata><versioning><versions><version>1.4.3</version><version>1.5.0</version></versions></versioning></metadata>`)
+	}))
+	defer srv.Close()
+	saved := endpoints.Maven
+	endpoints.Maven = srv.URL
+	defer func() { endpoints.Maven = saved }()
+	vs, err := Upstream(context.Background(), &catalog.Plugin{Kind: catalog.KindJvm, Maven: "io.grpc:protoc-gen-grpc-kotlin"})
+	if err != nil || strings.Join(vs, " ") != "v1.4.3 v1.5.0" {
+		t.Fatalf("versions from Maven: %v %v", vs, err)
 	}
 }
 

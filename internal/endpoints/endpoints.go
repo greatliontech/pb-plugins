@@ -17,6 +17,9 @@ var (
 	// GitHub serves a repository's tag archives (the API is the
 	// github package's own).
 	GitHub = "https://github.com"
+	// Adoptium answers for the Temurin JDK releases: a release's
+	// assets per platform, each with its checksum.
+	Adoptium = "https://api.adoptium.net"
 	// SwiftOrg publishes the Swift releases and, per release, the
 	// static Linux SDK's bundle revision and checksum; SwiftDownload
 	// serves the bundles.

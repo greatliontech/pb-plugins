@@ -48,6 +48,10 @@ const (
 	// KindDart compiles a Dart package's script to an executable at
 	// the repository's tag on a runner of the platform itself.
 	KindDart Kind = "dart"
+	// KindJvm bundles a jar from Maven Central with a runtime linked
+	// for every platform from the pinned JDK's modules, the image's
+	// entrypoint `jre/bin/java -jar <jar>`.
+	KindJvm Kind = "jvm"
 )
 
 // Platforms is every platform a recipe may serve, in the spelling
@@ -60,7 +64,9 @@ type Plugin struct {
 	Source string `yaml:"source"`
 	Kind   Kind   `yaml:"kind"`
 	// Entrypoint is the executable's name at the tree's root, the
-	// image's `/<entrypoint>`, on every platform.
+	// image's `/<entrypoint>`, on every platform — for the jvm kind
+	// the jar's name, `/<entrypoint>.jar`, run by the runtime beside
+	// it (Argv).
 	Entrypoint string `yaml:"entrypoint"`
 	// Platforms are the platforms the plugin serves. A release recipe
 	// serves the keys of Assets instead.
@@ -112,6 +118,15 @@ type Plugin struct {
 	// Main is the Dart script a dart recipe compiles, relative to
 	// the package's directory (Dir) in the repository.
 	Main string `yaml:"main"`
+	// Classifier and Extension name a jvm recipe's jar among the
+	// artifact's files at a version: `<artifact>-<version>[-<classifier>].<extension>`,
+	// the extension `jar` where unnamed (ScalaPB publishes its
+	// generator as a jar with a shell prefix under `unix.sh`).
+	// Modules are the JDK modules the runtime is linked from, the
+	// kind's own list where unnamed.
+	Classifier string   `yaml:"classifier"`
+	Extension  string   `yaml:"extension"`
+	Modules    []string `yaml:"modules"`
 	// Assets map a platform to the asset holding the executable: a
 	// release asset's name under the repository's release, or a URL
 	// (`https://...`) wherever upstream publishes — Maven Central, a
@@ -260,6 +275,7 @@ var (
 	entrypointRE = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 	repoRE       = regexp.MustCompile(`^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$`)
 	mavenRE      = regexp.MustCompile(`^[A-Za-z0-9._-]+:[A-Za-z0-9._-]+$`)
+	moduleRE     = regexp.MustCompile(`^[a-z][A-Za-z0-9]*(\.[a-z][A-Za-z0-9]*)*$`)
 	crateRE      = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{0,63}$`)
 	lineRE       = regexp.MustCompile(`^v(0|[1-9][0-9]*)$`)
 	toolchainRE  = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
@@ -277,12 +293,29 @@ var owned = map[Kind]map[string]bool{
 	KindRust:    fields("platforms", "crate", "bin"),
 	KindSwift:   fields("platforms", "repository", "tag", "product"),
 	KindDart:    fields("platforms", "repository", "tag", "dir", "main"),
+	KindJvm:     fields("platforms", "maven", "classifier", "extension", "checksum", "modules"),
 }
+
+// JvmModules are the JDK modules a jvm recipe's runtime is linked
+// from where it names none: what the generators on Maven need, as
+// buf links them.
+var JvmModules = []string{"java.base", "java.compiler", "java.instrument", "java.logging", "java.management", "jdk.unsupported"}
 
 // pinned are the kinds whose toolchain the pipeline installs from
 // the catalog's `toolchains`, each required where a recipe of the
 // kind exists.
-var pinned = map[Kind]bool{KindRust: true, KindSwift: true, KindDart: true}
+var pinned = map[Kind]bool{KindRust: true, KindSwift: true, KindDart: true, KindJvm: true}
+
+// toolchainREs are the shapes a kind's pin takes: a release number
+// for rust, swift and dart; Temurin's release name for the jvm
+// kind's JDK (`21.0.12.1+1`, the build number after the plus), the
+// name Adoptium's API serves the release's assets under.
+var toolchainREs = map[Kind]*regexp.Regexp{
+	KindRust:  toolchainRE,
+	KindSwift: toolchainRE,
+	KindDart:  toolchainRE,
+	KindJvm:   regexp.MustCompile(`^[0-9]+(\.[0-9]+)*\+[0-9]+$`),
+}
 
 // sdkPinned are the kinds whose linux SDK the pipeline installs from
 // the catalog's `sdks`, required where a recipe of the kind exists.
@@ -386,7 +419,7 @@ func (c *Catalog) Validate() error {
 		if !pinned[Kind(kind)] {
 			errs = append(errs, fmt.Errorf("toolchains: %q names no kind the pipeline pins a toolchain for", kind))
 		}
-		if !toolchainRE.MatchString(v) {
+		if re := toolchainREs[Kind(kind)]; re != nil && !re.MatchString(v) {
 			errs = append(errs, fmt.Errorf("toolchains: %s %q is no release number", kind, v))
 		}
 	}
@@ -529,6 +562,24 @@ func (c *Catalog) Validate() error {
 			if !repoRE.MatchString(p.Repository) || !strings.Contains(p.Tag, "{version}") || !entrypointRE.MatchString(p.Product) {
 				fail(name, "swift: repository, tag with {version} and product (a bare name) required")
 			}
+		case KindJvm:
+			if !mavenRE.MatchString(p.Maven) {
+				fail(name, "jvm: maven group:artifact required")
+			}
+			if p.Classifier != "" && !entrypointRE.MatchString(p.Classifier) {
+				fail(name, "jvm: classifier %q is no bare name", p.Classifier)
+			}
+			if p.Extension != "" && !entrypointRE.MatchString(p.Extension) {
+				fail(name, "jvm: extension %q is no bare name", p.Extension)
+			}
+			if p.Checksum != "sha256" && p.Checksum != "sha1" {
+				fail(name, "jvm: checksum sha256 or sha1 required, the digest Maven publishes beside the jar")
+			}
+			for _, m := range p.Modules {
+				if !moduleRE.MatchString(m) {
+					fail(name, "jvm: module %q is no module name", m)
+				}
+			}
 		case KindDart:
 			if !repoRE.MatchString(p.Repository) || !strings.Contains(p.Tag, "{version}") {
 				fail(name, "dart: repository owner/name and tag with {version} required")
@@ -649,6 +700,49 @@ func (k Kind) Known() bool { _, ok := owned[k]; return ok }
 // library, which is every kind but go, rust and swift, whose Linux
 // executables are static.
 func (k Kind) NeedsBase() bool { return k != KindGo && k != KindRust && k != KindSwift }
+
+// Argv is the plugin process the image declares, as the build takes
+// it: every kind's one executable at the tree's root, the jvm
+// kind's the runtime's java over the jar — the program an absolute
+// path in the tree, which every runner resolves there, the jar
+// relative to the working directory, the tree's root, since an OS
+// row hands the arguments to the plugin as spelled — one argv for
+// every platform (the build takes one; the runtime's launcher is
+// laid down under its bare name on every platform, as every
+// entrypoint is, the build marking the program executable).
+func (p *Plugin) Argv() []string {
+	if p.Kind == KindJvm {
+		// Processes are started by fork and exec, not through the
+		// runtime's spawn helper: the build marks one set of files
+		// executable in every tree, and the helper is no file of a
+		// windows tree, where the property is read and means nothing.
+		return []string{"/jre/bin/java", "-Djdk.lang.Process.launchMechanism=FORK", "-jar", p.Entrypoint + ".jar"}
+	}
+	return []string{"/" + p.Entrypoint}
+}
+
+// JarFile is a jvm recipe's jar among the artifact's files at the
+// version: `<artifact>-<number>[-<classifier>].<extension>`.
+func (p *Plugin) JarFile(version string) string {
+	_, artifact, _ := strings.Cut(p.Maven, ":")
+	name := artifact + "-" + strings.TrimPrefix(version, "v")
+	if p.Classifier != "" {
+		name += "-" + p.Classifier
+	}
+	ext := p.Extension
+	if ext == "" {
+		ext = "jar"
+	}
+	return name + "." + ext
+}
+
+// JvmModules are the modules the recipe's runtime is linked from.
+func (p *Plugin) JvmModules() []string {
+	if len(p.Modules) > 0 {
+		return p.Modules
+	}
+	return JvmModules
+}
 
 // Expand fills a recipe template: `{version}` with the version's
 // number (the tag less its `v`), `{tag}` with the tag as pb spells

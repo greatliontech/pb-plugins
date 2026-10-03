@@ -60,10 +60,13 @@ func (p *Publisher) Publish(ctx context.Context, name, version string) error {
 		fmt.Fprintf(p.Out, "%s@%s published already\n", ref, digest)
 		return p.sign(ctx, ref, digest)
 	}
-	args := []string{"plugin", "build", ref, "--entrypoint", "/" + pl.Entrypoint}
+	args := []string{"plugin", "build", ref}
+	for _, a := range pl.Argv() {
+		args = append(args, "--entrypoint", a)
+	}
 	for _, platform := range pl.PlatformsOf() {
 		tree := recipe.TreeDir(p.Trees, platform)
-		if _, err := os.Stat(filepath.Join(tree, pl.Entrypoint)); err != nil {
+		if _, err := os.Stat(filepath.Join(tree, filepath.FromSlash(pl.Argv()[0]))); err != nil {
 			return fmt.Errorf("%s %s: no tree for %s: %w", name, version, platform, err)
 		}
 		args = append(args, "--platform", platform+"="+tree)

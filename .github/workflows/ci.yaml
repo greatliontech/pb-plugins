@@ -43,6 +43,10 @@ jobs:
         uses: ./.github/actions/toolchain
         with:
           kind: dart
+      - name: Pin the jvm toolchain, as the catalog has it
+        uses: ./.github/actions/toolchain
+        with:
+          kind: jvm
       - run: go run ./cmd/catalog check
       - run: go test ./... -count=1 -timeout 40m
         env:

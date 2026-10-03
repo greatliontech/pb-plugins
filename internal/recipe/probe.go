@@ -60,10 +60,18 @@ func probeRequest(parameter string) ([]byte, error) {
 func probeTree(ctx context.Context, p *catalog.Plugin, platforms []string, out string) error {
 	for _, pl := range platforms {
 		if pl == Host() {
-			return Probe(ctx, filepath.Join(TreeDir(out, pl), p.Entrypoint), p.Parameter, p.Silent)
+			return ProbeArgv(ctx, TreeDir(out, pl), p.Argv(), p.Parameter, p.Silent)
 		}
 	}
 	return nil
+}
+
+// ProbeArgv probes a tree as a runner runs it: the argv the image
+// declares, its program (an absolute path in the tree) resolved to
+// the tree's, its arguments as spelled, the tree's root the working
+// directory.
+func ProbeArgv(ctx context.Context, tree string, argv []string, parameter string, silent bool) error {
+	return probe(ctx, tree, filepath.Join(tree, filepath.FromSlash(argv[0])), argv[1:], parameter, silent)
 }
 
 // Probe runs a built executable as a plugin over probeRequest and
@@ -78,6 +86,13 @@ func probeTree(ctx context.Context, p *catalog.Plugin, platforms []string, out s
 // The request carries the recipe's parameter, for a plugin that
 // answers nothing without one.
 func Probe(ctx context.Context, exe, parameter string, silent bool) error {
+	return probe(ctx, "", exe, nil, parameter, silent)
+}
+
+// probe runs the executable with the arguments in dir (the
+// process's own where empty) as a plugin over probeRequest and reads
+// its answer, as Probe says.
+func probe(ctx context.Context, dir, exe string, args []string, parameter string, silent bool) (err error) {
 	req, err := probeRequest(parameter)
 	if err != nil {
 		return err
@@ -86,10 +101,17 @@ func Probe(ctx context.Context, exe, parameter string, silent bool) error {
 	if err != nil {
 		return err
 	}
-	defer cleanup()
+	// The copy beside the program is no file of the tree: one left
+	// behind would be published, so its removal is held to.
+	defer func() {
+		if cerr := cleanup(); cerr != nil && err == nil {
+			err = fmt.Errorf("probe: %s: the copy beside the program stays: %w", exe, cerr)
+		}
+	}()
 	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, exe)
+	cmd := exec.CommandContext(ctx, exe, args...)
+	cmd.Dir = dir
 	cmd.Stdin = bytes.NewReader(req)
 	cmd.WaitDelay = 5 * time.Second
 	var out, errs bytes.Buffer
@@ -115,22 +137,18 @@ func Probe(ctx context.Context, exe, parameter string, silent bool) error {
 }
 
 // startable is the executable as the host starts it: on windows a
-// copy under `.exe` in a temporary directory where the path bears no
-// extension, since Go's exec resolves a Windows path by its
-// extension and the tree's entrypoint bears none; the path itself
-// elsewhere, and on windows where it bears one.
-func startable(exe string) (string, func(), error) {
+// copy under `.exe` beside it where the path bears no extension —
+// since Go's exec resolves a Windows path by its extension and the
+// tree's entrypoint bears none — beside it so a launcher finds its
+// own libraries and siblings where they lie, the copy removed after;
+// the path itself elsewhere, and on windows where it bears one.
+func startable(exe string) (string, func() error, error) {
 	if runtime.GOOS != "windows" || filepath.Ext(exe) != "" {
-		return exe, func() {}, nil
+		return exe, func() error { return nil }, nil
 	}
-	dir, err := os.MkdirTemp("", "pb-plugins-probe-")
-	if err != nil {
-		return "", nil, err
-	}
-	copy := filepath.Join(dir, filepath.Base(exe)+".exe")
+	copy := exe + ".exe"
 	if err := copyFile(exe, copy); err != nil {
-		os.RemoveAll(dir)
 		return "", nil, err
 	}
-	return copy, func() { os.RemoveAll(dir) }, nil
+	return copy, func() error { return os.Remove(copy) }, nil
 }

@@ -16,6 +16,7 @@ toolchains:
   rust: 1.98.1
   swift: 6.4.0
   dart: 3.13.5
+  jvm: 21.0.12.1+1
 # The sha256 of the static Linux SDK bundle swift.org publishes for
 # the Swift release pinned above, which the runner installs beside
 # the toolchain; `catalog sdk swift` reads swift.org's and holds the
@@ -317,21 +318,20 @@ plugins:
       darwin/amd64: https://repo1.maven.org/maven2/io/grpc/protoc-gen-grpc-java/{version}/protoc-gen-grpc-java-{version}-osx-x86_64.exe
       darwin/arm64: https://repo1.maven.org/maven2/io/grpc/protoc-gen-grpc-java/{version}/protoc-gen-grpc-java-{version}-osx-aarch_64.exe
       windows/amd64: https://repo1.maven.org/maven2/io/grpc/protoc-gen-grpc-java/{version}/protoc-gen-grpc-java-{version}-windows-x86_64.exe
-  # ScalaPB's native protoc-gen-scala, for linux and darwin on x86_64,
-  # from the releases that carry it: the 0.11 line's past v0.11.17
-  # (v0.11.18 to v0.11.20) ship as the jar alone, with no release at
-  # all, and are not served here; the 1.0 line's releases carry it
-  # again and enter with the bump once one is stable.
+  # ScalaPB's protoc-gen-scala from the jar Maven publishes for every
+  # version (the runnable one under the unix classifier), as buf
+  # serves it: v0.11.17's published trees, built from the
+  # release's native executables for linux and darwin on x86_64,
+  # stand as published; the versions from v0.11.18 on build here.
   community/scalapb-scala:
     source: https://github.com/scalapb/ScalaPB
-    kind: release
-    repository: scalapb/ScalaPB
-    tag: v{version}
-    member: protoc-gen-scala
+    kind: jvm
+    maven: com.thesamet.scalapb:protoc-gen-scala
+    classifier: unix
+    extension: sh
+    checksum: sha1
     entrypoint: protoc-gen-scala
-    assets:
-      linux/amd64: protoc-gen-scala-{version}-linux-x86_64.zip
-      darwin/amd64: protoc-gen-scala-{version}-osx-x86_64.zip
+    platforms: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64, windows/arm64]
   # grpc-tools' executable, numbered by grpc-tools, at grpc's binary
   # host under node's platform names; the darwin archive lays its
   # files under the architecture's directory. Upstream's darwin-arm64
@@ -718,3 +718,46 @@ plugins:
     main: bin/protoc-gen-connect-dart.dart
     entrypoint: protoc-gen-connect-dart
     platforms: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64, windows/arm64]
+
+  # kind jvm: a jar from Maven Central bundled with a runtime linked
+  # for every platform from the pinned JDK's modules, the image's
+  # process `jre/bin/java -jar <jar>`; the versions Maven's. The
+  # runtime links the C library: base applies. The jar is verified
+  # against the digest Maven publishes beside it, sha256 where it has
+  # one, sha1 for every artifact. ScalaPB's generators publish the
+  # runnable jar with a shell prefix under the unix classifier, the
+  # plain jar carrying no main class.
+  community/scalapb-zio-grpc:
+    source: https://github.com/scalapb/zio-grpc
+    kind: jvm
+    maven: com.thesamet.scalapb.zio-grpc:protoc-gen-zio
+    classifier: unix
+    extension: sh
+    checksum: sha1
+    entrypoint: protoc-gen-zio
+    platforms: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64, windows/arm64]
+  grpc/kotlin:
+    source: https://github.com/grpc/grpc-kotlin
+    kind: jvm
+    maven: io.grpc:protoc-gen-grpc-kotlin
+    classifier: jdk8
+    checksum: sha256
+    entrypoint: protoc-gen-grpc-kotlin
+    platforms: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64, windows/arm64]
+  connectrpc/kotlin:
+    source: https://github.com/connectrpc/connect-kotlin
+    kind: jvm
+    maven: com.connectrpc:protoc-gen-connect-kotlin
+    checksum: sha256
+    entrypoint: protoc-gen-connect-kotlin
+    platforms: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64, windows/arm64]
+  # connect-kotlin before its move to connectrpc; deprecated upstream,
+  # its last release the one published.
+  bufbuild/connect-kotlin:
+    source: https://github.com/bufbuild/connect-kotlin
+    kind: jvm
+    maven: build.buf:protoc-gen-connect-kotlin
+    checksum: sha256
+    entrypoint: protoc-gen-connect-kotlin
+    platforms: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64, windows/arm64]
+    frozen: true

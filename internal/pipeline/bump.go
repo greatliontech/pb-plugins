@@ -75,7 +75,8 @@ func Bump(ctx context.Context, c *catalog.Catalog, discover Discover) (map[strin
 // recipe builds from a tag — the npm registry for node, the GitHub
 // releases of the repository for release and bazel — Maven Central's
 // metadata or the npm registry for a release recipe naming its
-// artifact or package — crates.io for rust.
+// artifact or package — crates.io for rust, Maven Central's metadata
+// for jvm.
 func Upstream(ctx context.Context, p *catalog.Plugin) ([]string, error) {
 	switch p.Kind {
 	case catalog.KindGo:
@@ -97,6 +98,8 @@ func Upstream(ctx context.Context, p *catalog.Plugin) ([]string, error) {
 		return releaseVersions(ctx, p.Repository, p.Tag)
 	case catalog.KindRust:
 		return cratesVersions(ctx, p.Crate)
+	case catalog.KindJvm:
+		return mavenVersions(ctx, p.Maven)
 	}
 	return nil, fmt.Errorf("unknown kind %q", p.Kind)
 }

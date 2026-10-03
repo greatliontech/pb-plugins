@@ -37,15 +37,13 @@ and `pluginrpc`, and of the rest `apple/swift`,
 `community/scalapb-scala`, `community/scalapb-zio-grpc`,
 `community/planetscale-vtprotobuf` and the community generators the
 `go` and `node` kinds build. A plugin enters when its kind exists:
-the kinds below first, then kinds for the rest — `jvm` and
-`python`. A plugin that is a program for
-a runtime rather than one executable (a jar, a Python package) ships
-the runtime in its image behind a native launcher as the entrypoint,
-never compiled to a native executable here; where upstream itself
-ships one, the `release` kind takes upstream's — ScalaPB's
-protoc-gen-scala from the releases that carry it, which the 0.11
-line's past v0.11.17 do not, shipping as the jar alone, for the
-`jvm` kind to serve beside this recipe.
+the kinds below first, then a kind for the rest — `python`. A
+plugin that is a program for a runtime rather than one executable
+(a jar, a Python package) ships the runtime in its image beside the
+program, the image's process the runtime's launcher over it, never
+compiled to a native executable here; ScalaPB's protoc-gen-scala
+is such a program, served from the jar Maven publishes for every
+version, as buf serves it.
 
 ## Recipe kinds
 
@@ -57,6 +55,7 @@ line's past v0.11.17 do not, shipping as the jar alone, for the
 | `bazel` | a C++ target built by bazel on a runner of the platform itself | linux and darwin on both architectures, windows/amd64 (no bazel C++ toolchain is established for windows/arm64) | the repository's releases |
 | `swift` | a SwiftPM product built by swift at the repository's tag on a runner of the platform itself, with the toolchain the catalog pins (`toolchains`), with swift.org's static Linux SDK on linux so the executable is static (held to be before it is laid down, its symbols stripped), resolved to the lockfile the package commits where it commits one | linux and darwin on both architectures (no upstream builds its generator on windows) | the repository's releases |
 | `dart` | a Dart package's script compiled by `dart compile exe` at the repository's tag on a runner of the platform itself, with the SDK the catalog pins (`toolchains`), its dependencies resolved by pub as the manifest allows | all six | the repository's releases |
+| `jvm` | a jar from Maven Central at its coordinates (`maven`, a `classifier` and an `extension` where the file bears them), verified against the digest Maven publishes beside it (`checksum`: its sha256 where it has one, its sha1 for every artifact), bundled with a runtime jlink'd for every platform on one host from the pinned JDK's modules (`toolchains`, Temurin's release, its assets at Adoptium's checksums; `modules` where the kind's own list does not serve), the image's process `/jre/bin/java -jar <jar>` with the jar named relative to the working directory, the tree's root, processes forked rather than spawned through the runtime's helper | all six | Maven Central's metadata |
 | `rust` | a crate's executable installed by cargo on a runner of the platform itself, with the toolchain the catalog pins (`toolchains`), for the musl target on linux so the executable is static (held to be before it is laid down; a crate whose C dependencies need a musl C toolchain beyond the runner's compiler fails its tree job), locked to the lockfile the crate publishes (one without is refused) | all six | crates.io |
 
 Every kind's trees are held to the plugin protocol before they are
@@ -94,10 +93,14 @@ another line beside it that carries the executable no more
 
 The six platforms are pb's: `linux/amd64`, `linux/arm64`,
 `darwin/amd64`, `darwin/arm64`, `windows/amd64`, `windows/arm64`.
-Every kind lays out one file per platform, the entrypoint at the
-tree's root, which the image carries as `/<entrypoint>`. The Linux
-executables of the `node`, `release`, `bazel` and `dart` kinds may
-link the platform's C library (dart's runtime does), so their Linux
+A kind lays out, per platform, the tree the image's process runs
+from: for most kinds one file, the entrypoint at the tree's root,
+which the image carries as `/<entrypoint>`; for the `jvm` kind the
+runtime under `jre/` beside the jar, the image's process the
+runtime's launcher over it. The Linux
+executables of the `node`, `release`, `bazel`, `dart` and `jvm`
+kinds may link the platform's C library (dart's and java's runtimes
+do), so their Linux
 trees are layered over the catalog's `base` (distroless `cc`, pinned
 by index digest and resolved to the platform's image at publish);
 the `go`, `rust` and `swift` kinds are static and take no base. On an `OS` sandbox row pb
@@ -107,15 +110,20 @@ kinds' plugins run natively.
 A rust, swift or dart recipe, like a bazel one, builds on a runner
 of the platform itself: cargo installs the crate from crates.io,
 swift builds the package at its tag, dart compiles the package's
-script, for the host alone; the pipeline installs the kind's pinned
+script, for the host alone; a jvm recipe builds every platform on
+one host, jlink linking each platform's runtime from that
+platform's modules. The pipeline installs the kind's pinned
 toolchain on the runner first (rustup, swiftly, the Dart SDK from
-Google's archive at the checksum published beside it) and, on
-linux, what makes the executable static beside it
+Google's archive at the checksum published beside it, the Temurin
+JDK from Adoptium at the checksum it publishes) and, on linux,
+what makes the executable static beside it
 (cargo's musl target, swift.org's static Linux SDK at the checksum
 the catalog pins, held equal to the one swift.org publishes). A
-darwin tree is held to bind to the system's libraries alone before
-it is laid down, so a toolchain's library reached through a search
-path is refused rather than published to load on the runner alone.
+darwin tree is held to bind to the system's libraries or its own —
+through a run path relative to the image, as a bundled runtime's
+launcher binds its libraries — alone before it is laid down, so a
+toolchain's library reached through a search path elsewhere is
+refused rather than published to load on the runner alone.
 
 ## Pipeline
 
