@@ -36,10 +36,12 @@ and `pluginrpc`, and of the rest `apple/swift`,
 the four kinds below first, then kinds for the rest — `rust`,
 `swift`, `dart`, `jvm` and `python`. A plugin that is a program for
 a runtime rather than one executable (a jar, a Python package) ships
-the runtime in its image
-behind a native launcher as the entrypoint, never compiled to a
-native executable here; where upstream itself ships one (ScalaPB),
-the `release` kind takes upstream's.
+the runtime in its image behind a native launcher as the entrypoint,
+never compiled to a native executable here; where upstream itself
+ships one, the `release` kind takes upstream's — ScalaPB's
+protoc-gen-scala from the releases that carry it, which the 0.11
+line's past v0.11.17 do not, shipping as the jar alone, for the
+`jvm` kind to serve beside this recipe.
 
 ## Recipe kinds
 
@@ -78,7 +80,7 @@ The six platforms are pb's: `linux/amd64`, `linux/arm64`,
 `darwin/amd64`, `darwin/arm64`, `windows/amd64`, `windows/arm64`.
 Every kind lays out one file per platform, the entrypoint at the
 tree's root, which the image carries as `/<entrypoint>`. The Linux
-executables of the `node`, `release` and `bazel` kinds link the
+executables of the `node`, `release` and `bazel` kinds may link the
 platform's C library, so their Linux trees are layered over the
 catalog's `base` (distroless `cc`, pinned by index digest and
 resolved to the platform's image at publish); the `go` kind is

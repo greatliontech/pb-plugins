@@ -219,7 +219,7 @@ func TestFetchAssetBareAndVerified(t *testing.T) {
 	if b, _ := os.ReadFile(out); !bytes.Equal(b, exe) {
 		t.Errorf("the bare asset: %q", b)
 	}
-	if fi, _ := os.Stat(out); fi.Mode()&0o111 == 0 {
+	if fi, _ := os.Stat(out); runtime.GOOS != "windows" && fi.Mode()&0o111 == 0 {
 		t.Error("the bare asset is not executable")
 	}
 	if err := fetchAsset(context.Background(), srv.URL+"/wrong.exe", "sha256", "", "linux/amd64", filepath.Join(dir, "w")); err == nil || !strings.Contains(err.Error(), "upstream publishes") {
@@ -447,9 +447,10 @@ func TestGoKindFromATagLive(t *testing.T) {
 }
 
 // The release kind reads beyond GitHub releases: grpc/java's
-// executable from Maven Central, its sha256 verified, and grpc/node's
-// from grpc's binary host, every platform each serves built from this
-// host (network). Runs where PBPLUGINS_LIVE is set.
+// executable from Maven Central, its sha256 verified, grpc/node's
+// from grpc's binary host and ScalaPB's from its GitHub release,
+// every platform each serves built from this host (network). Runs
+// where PBPLUGINS_LIVE is set.
 func TestReleaseSourcesLive(t *testing.T) {
 	if os.Getenv("PBPLUGINS_LIVE") == "" {
 		t.Skip("PBPLUGINS_LIVE unset")
@@ -458,7 +459,7 @@ func TestReleaseSourcesLive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for name, version := range map[string]string{"grpc/java": "v1.84.0", "grpc/node": "v1.13.1"} {
+	for name, version := range map[string]string{"grpc/java": "v1.84.0", "grpc/node": "v1.13.1", "community/scalapb-scala": "v0.11.17"} {
 		out := t.TempDir()
 		platforms := c.Plugins[name].PlatformsOf()
 		if err := Build(context.Background(), c, name, version, platforms, out); err != nil {
