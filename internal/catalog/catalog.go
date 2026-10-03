@@ -31,8 +31,9 @@ const (
 	// KindNode compiles an npm package's executable with bun into a
 	// standalone executable per platform.
 	KindNode Kind = "node"
-	// KindRelease takes an executable an upstream GitHub release
-	// ships prebuilt, one asset per platform.
+	// KindRelease takes an executable upstream ships prebuilt, from a
+	// GitHub release's asset or a URL: an archive holding it, or the
+	// executable itself.
 	KindRelease Kind = "release"
 	// KindBazel builds a C++ target with bazel from an upstream source
 	// archive, on a runner of the platform itself.
@@ -85,11 +86,27 @@ type Plugin struct {
 	// with pb's `v` stripped).
 	Repository string `yaml:"repository"`
 	Tag        string `yaml:"tag"`
-	// Assets map a platform to the release asset holding the
-	// executable and Member is its path within the archive
+	// Assets map a platform to the asset holding the executable: a
+	// release asset's name under the repository's release, or a URL
+	// (`https://...`) wherever upstream publishes — Maven Central, a
+	// project's binary host; Member is the executable's path within
+	// the archive, none where the asset is the executable itself
 	// (`{exe}` is `.exe` on windows, empty elsewhere).
 	Assets map[string]string `yaml:"assets"`
 	Member string            `yaml:"member"`
+	// Members name a platform's member where it differs from Member
+	// (upstream laying its archives out per platform).
+	Members map[string]string `yaml:"members"`
+	// Maven names a release recipe's Maven Central artifact,
+	// `group:artifact`, whose metadata lists its versions; Npm the npm
+	// package whose registry entry lists them; a recipe naming
+	// neither takes the repository's releases.
+	Maven string `yaml:"maven"`
+	Npm   string `yaml:"npm"`
+	// Checksum names the digest upstream publishes beside each asset
+	// (`sha256`: the asset's URL with `.sha256` appended, the hex
+	// digest first on its line), verified before the asset is read.
+	Checksum string `yaml:"checksum"`
 
 	// Archive is a bazel recipe's source archive URL, Strip the
 	// leading path components dropped extracting it, Files the
@@ -200,7 +217,30 @@ var (
 	versionRE    = regexp.MustCompile(`^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*))?$`)
 	entrypointRE = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 	repoRE       = regexp.MustCompile(`^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$`)
+	mavenRE      = regexp.MustCompile(`^[A-Za-z0-9._-]+:[A-Za-z0-9._-]+$`)
 )
+
+// MemberOf is the member of a platform's asset: the platform's own
+// where Members names one, else Member.
+func (p *Plugin) MemberOf(platform string) string {
+	if m, ok := p.Members[platform]; ok {
+		return m
+	}
+	return p.Member
+}
+
+// Archive tells, by an asset's name, the archive the member is
+// extracted from — "zip", or "tgz" for a gzip-compressed tar — or
+// "" for an asset that is the executable itself.
+func Archive(asset string) string {
+	switch {
+	case strings.HasSuffix(asset, ".zip"):
+		return "zip"
+	case strings.HasSuffix(asset, ".tar.gz"), strings.HasSuffix(asset, ".tgz"):
+		return "tgz"
+	}
+	return ""
+}
 
 // Names are the plugin names, sorted.
 func (c *Catalog) Names() []string {
@@ -271,19 +311,69 @@ func (c *Catalog) Validate() error {
 			} else if p.Module == "" {
 				fail(name, "go: module required")
 			}
-			if p.Assets != nil || p.Member != "" || p.Archive != "" || p.Files != "" || p.Target != "" || p.Output != "" || p.Options != nil {
+			if p.Assets != nil || p.Member != "" || p.Members != nil || p.Maven != "" || p.Npm != "" || p.Checksum != "" || p.Archive != "" || p.Files != "" || p.Target != "" || p.Output != "" || p.Options != nil {
 				fail(name, "go: a field of another kind set")
 			}
 		case KindNode:
 			if p.Package == "" {
 				fail(name, "node: package required")
 			}
-			if p.Module != "" || p.Dir != "" || p.Tags != nil || p.Repository != "" || p.Tag != "" || p.Assets != nil || p.Member != "" || p.Archive != "" || p.Files != "" || p.Target != "" || p.Output != "" || p.Options != nil {
+			if p.Module != "" || p.Dir != "" || p.Tags != nil || p.Repository != "" || p.Tag != "" || p.Assets != nil || p.Member != "" || p.Members != nil || p.Maven != "" || p.Npm != "" || p.Checksum != "" || p.Archive != "" || p.Files != "" || p.Target != "" || p.Output != "" || p.Options != nil {
 				fail(name, "node: a field of another kind set")
 			}
 		case KindRelease:
-			if !repoRE.MatchString(p.Repository) || !strings.Contains(p.Tag, "{version}") || len(p.Assets) == 0 || p.Member == "" {
-				fail(name, "release: repository, tag with {version}, assets and member required")
+			if len(p.Assets) == 0 {
+				fail(name, "release: assets required")
+			}
+			sources := 0
+			for _, set := range []bool{p.Repository != "", p.Maven != "", p.Npm != ""} {
+				if set {
+					sources++
+				}
+			}
+			if sources != 1 {
+				fail(name, "release: exactly one of repository, maven and npm names where the versions are")
+			}
+			if (p.Repository != "") != (p.Tag != "") {
+				fail(name, "release: repository and tag go together")
+			}
+			if p.Repository != "" && (!repoRE.MatchString(p.Repository) || !strings.Contains(p.Tag, "{version}")) {
+				fail(name, "release: repository owner/name and tag with {version} required")
+			}
+			if p.Maven != "" && !mavenRE.MatchString(p.Maven) {
+				fail(name, "release: maven %q is no group:artifact", p.Maven)
+			}
+			if p.Checksum != "" && p.Checksum != "sha256" {
+				fail(name, "release: checksum %q is none of sha256", p.Checksum)
+			}
+			for _, asset := range p.Assets {
+				byURL := strings.HasPrefix(asset, "https://")
+				// A release asset's name may be the same at every
+				// release, the tag naming the version; a URL names it
+				// itself.
+				if byURL && !strings.Contains(asset, "{version}") && !strings.Contains(asset, "{tag}") {
+					fail(name, "release: asset %q names neither {version} nor {tag}", asset)
+				}
+				if !byURL && p.Repository == "" {
+					fail(name, "release: asset %q is a release asset's name, which needs the repository", asset)
+				}
+				if !byURL && strings.ContainsAny(asset, "/:") {
+					fail(name, "release: asset %q is neither a release asset's bare name nor an https URL", asset)
+				}
+			}
+			for pl := range p.Members {
+				if _, ok := p.Assets[pl]; !ok {
+					fail(name, "release: members names %q, which has no asset", pl)
+				}
+			}
+			for pl, asset := range p.Assets {
+				member := p.MemberOf(pl)
+				if member == "" && Archive(asset) != "" {
+					fail(name, "release: asset %q is an archive, which needs the member", asset)
+				}
+				if member != "" && Archive(asset) == "" {
+					fail(name, "release: asset %q is no archive, the executable itself, which takes no member", asset)
+				}
 			}
 			if p.Platforms != nil || p.Module != "" || p.Dir != "" || p.Package != "" || p.Tags != nil || p.Archive != "" || p.Files != "" || p.Target != "" || p.Output != "" || p.Options != nil {
 				fail(name, "release: a field of another kind set (platforms are the assets' keys)")
@@ -297,7 +387,7 @@ func (c *Catalog) Validate() error {
 			if !repoRE.MatchString(p.Repository) || !strings.Contains(p.Tag, "{version}") || !strings.Contains(p.Archive, "{version}") || p.Target == "" || p.Output == "" {
 				fail(name, "bazel: repository, tag and archive with {version}, target and output required")
 			}
-			if p.Module != "" || p.Dir != "" || p.Package != "" || p.Tags != nil || p.Assets != nil || p.Member != "" {
+			if p.Module != "" || p.Dir != "" || p.Package != "" || p.Tags != nil || p.Assets != nil || p.Member != "" || p.Members != nil || p.Maven != "" || p.Npm != "" || p.Checksum != "" {
 				fail(name, "bazel: a field of another kind set")
 			}
 			if p.Files != "" && (filepath.IsAbs(p.Files) || strings.Contains(p.Files, "..") || strings.Contains(p.Files, "/")) {

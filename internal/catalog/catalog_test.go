@@ -69,6 +69,23 @@ func TestValidate(t *testing.T) {
 		{"version order", "  a/b:\n    source: s\n    kind: go\n    module: m\n    package: .\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.1.0\nv1.0.0\n", "not ascending"},
 		{"version twice", "  a/b:\n    source: s\n    kind: go\n    module: m\n    package: .\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\nv1.0.0\n", "not ascending"},
 		{"release ok", "  a/b:\n    source: s\n    kind: release\n    repository: o/r\n    tag: v{version}\n    member: bin/e{exe}\n    entrypoint: e\n    assets:\n      linux/amd64: x.tar.gz\n      windows/amd64: x.zip\n", "v1.0.0\n", ""},
+		{"release from maven", "  a/b:\n    source: s\n    kind: release\n    maven: g.h:a\n    checksum: sha256\n    entrypoint: e\n    assets:\n      linux/amd64: https://x/{version}/a-{version}.exe\n", "v1.0.0\n", ""},
+		{"release from npm", "  a/b:\n    source: s\n    kind: release\n    npm: p\n    member: bin/e{exe}\n    entrypoint: e\n    assets:\n      linux/amd64: https://x/v{version}/linux-x64.tar.gz\n", "v1.0.0\n", ""},
+		{"release two sources", "  a/b:\n    source: s\n    kind: release\n    repository: o/r\n    tag: v{version}\n    maven: g:a\n    entrypoint: e\n    assets:\n      linux/amd64: https://x/{version}.exe\n", "v1.0.0\n", "exactly one of"},
+		{"release no source", "  a/b:\n    source: s\n    kind: release\n    entrypoint: e\n    assets:\n      linux/amd64: https://x/{version}.exe\n", "v1.0.0\n", "exactly one of"},
+		{"release name without repository", "  a/b:\n    source: s\n    kind: release\n    maven: g:a\n    entrypoint: e\n    assets:\n      linux/amd64: a-{version}.exe\n", "v1.0.0\n", "needs the repository"},
+		{"release archive without member", "  a/b:\n    source: s\n    kind: release\n    npm: p\n    entrypoint: e\n    assets:\n      linux/amd64: https://x/{version}.tar.gz\n", "v1.0.0\n", "needs the member"},
+		{"release executable with member", "  a/b:\n    source: s\n    kind: release\n    maven: g:a\n    member: bin/e\n    entrypoint: e\n    assets:\n      linux/amd64: https://x/{version}.exe\n", "v1.0.0\n", "takes no member"},
+		{"release asset without version", "  a/b:\n    source: s\n    kind: release\n    maven: g:a\n    entrypoint: e\n    assets:\n      linux/amd64: https://x/latest.exe\n", "v1.0.0\n", "names neither {version} nor {tag}"},
+		{"release checksum unknown", "  a/b:\n    source: s\n    kind: release\n    maven: g:a\n    checksum: md5\n    entrypoint: e\n    assets:\n      linux/amd64: https://x/{version}.exe\n", "v1.0.0\n", "none of sha256"},
+		{"release tag without repository", "  a/b:\n    source: s\n    kind: release\n    maven: g:a\n    tag: v{version}\n    entrypoint: e\n    assets:\n      linux/amd64: https://x/{version}.exe\n", "v1.0.0\n", "repository and tag go together"},
+		{"release name with a path", "  a/b:\n    source: s\n    kind: release\n    repository: o/r\n    tag: v{version}\n    entrypoint: e\n    assets:\n      linux/amd64: http://h/{version}.exe\n", "v1.0.0\n", "neither a release asset's bare name"},
+		{"release repository beside URL assets", "  a/b:\n    source: s\n    kind: release\n    repository: o/r\n    tag: v{version}\n    entrypoint: e\n    assets:\n      linux/amd64: https://h/{version}.exe\n", "v1.0.0\n", ""},
+		{"release members", "  a/b:\n    source: s\n    kind: release\n    npm: p\n    member: bin/e\n    members:\n      darwin/amd64: x64/e\n    entrypoint: e\n    assets:\n      linux/amd64: https://x/v{version}/l.tar.gz\n      darwin/amd64: https://x/v{version}/d.tar.gz\n", "v1.0.0\n", ""},
+		{"release members without asset", "  a/b:\n    source: s\n    kind: release\n    npm: p\n    member: bin/e\n    members:\n      darwin/arm64: x64/e\n    entrypoint: e\n    assets:\n      linux/amd64: https://x/v{version}/l.tar.gz\n", "v1.0.0\n", "has no asset"},
+		{"release members for an executable", "  a/b:\n    source: s\n    kind: release\n    maven: g:a\n    members:\n      linux/amd64: x\n    entrypoint: e\n    assets:\n      linux/amd64: https://x/{version}.exe\n", "v1.0.0\n", "takes no member"},
+		{"release maven malformed", "  a/b:\n    source: s\n    kind: release\n    maven: g/a\n    entrypoint: e\n    assets:\n      linux/amd64: https://x/{version}.exe\n", "v1.0.0\n", "no group:artifact"},
+		{"go with maven", "  a/b:\n    source: s\n    kind: go\n    module: m\n    package: .\n    maven: g:a\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", "a field of another kind"},
 		{"release with platforms", "  a/b:\n    source: s\n    kind: release\n    repository: o/r\n    tag: v{version}\n    member: bin/e\n    entrypoint: e\n    platforms: [linux/amd64]\n    assets:\n      linux/amd64: x.tar.gz\n", "v1.0.0\n", "a field of another kind"},
 		{"bazel ok", "  a/b:\n    source: s\n    kind: bazel\n    repository: o/r\n    tag: v{version}\n    archive: https://x/{version}.tar.gz\n    strip: 1\n    files: plugins\n    target: //t\n    output: bazel-bin/t{exe}\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", ""},
 		{"bazel files path", "  a/b:\n    source: s\n    kind: bazel\n    repository: o/r\n    tag: v{version}\n    archive: https://x/{version}.tar.gz\n    files: ../plugins\n    target: //t\n    output: bazel-bin/t\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", "no bare directory"},
@@ -135,6 +152,10 @@ func TestExpandAndPlatforms(t *testing.T) {
 	}
 	if got := Expand("bin/e{exe}", "v1.2.3", "linux/arm64"); got != "bin/e" {
 		t.Errorf("linux: %s", got)
+	}
+	m := &Plugin{Member: "bin/e", Members: map[string]string{"darwin/amd64": "x64/e"}}
+	if m.MemberOf("darwin/amd64") != "x64/e" || m.MemberOf("linux/amd64") != "bin/e" {
+		t.Errorf("members: %s %s", m.MemberOf("darwin/amd64"), m.MemberOf("linux/amd64"))
 	}
 	p := &Plugin{Platforms: []string{"windows/arm64", "linux/amd64"}, Assets: map[string]string{"darwin/arm64": "a"}}
 	if got := strings.Join(p.PlatformsOf(), " "); got != "linux/amd64 darwin/arm64 windows/arm64" {

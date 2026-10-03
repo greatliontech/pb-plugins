@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"sort"
 	"strings"
@@ -67,10 +68,18 @@ func Bump(ctx context.Context, c *catalog.Catalog, discover Discover) (map[strin
 // Proxy is the module proxy's base URL; a test points it at a fake.
 var Proxy = "https://proxy.golang.org"
 
+// Maven is Maven Central's base URL; a test points it at a fake.
+var Maven = "https://repo1.maven.org/maven2"
+
+// Npm is the npm registry's base URL; a test points it at a fake.
+var Npm = "https://registry.npmjs.org"
+
 // Upstream discovers versions from where each kind's versions live:
 // the module proxy for go — the repository's releases where the
 // recipe builds from a tag — the npm registry for node, the GitHub
-// releases of the repository for release and bazel.
+// releases of the repository for release and bazel — Maven Central's
+// metadata or the npm registry for a release recipe naming its
+// artifact or package.
 func Upstream(ctx context.Context, p *catalog.Plugin) ([]string, error) {
 	switch p.Kind {
 	case catalog.KindGo:
@@ -80,7 +89,15 @@ func Upstream(ctx context.Context, p *catalog.Plugin) ([]string, error) {
 		return goVersions(ctx, p.Module)
 	case catalog.KindNode:
 		return npmVersions(ctx, p.Package)
-	case catalog.KindRelease, catalog.KindBazel:
+	case catalog.KindRelease:
+		switch {
+		case p.Maven != "":
+			return mavenVersions(ctx, p.Maven)
+		case p.Npm != "":
+			return npmVersions(ctx, p.Npm)
+		}
+		return releaseVersions(ctx, p.Repository, p.Tag)
+	case catalog.KindBazel:
 		return releaseVersions(ctx, p.Repository, p.Tag)
 	}
 	return nil, fmt.Errorf("unknown kind %q", p.Kind)
@@ -99,7 +116,7 @@ func goVersions(ctx context.Context, mod string) ([]string, error) {
 }
 
 func npmVersions(ctx context.Context, pkg string) ([]string, error) {
-	body, err := web.Get(ctx, "https://registry.npmjs.org/"+pkg, map[string]string{"Accept": "application/vnd.npm.install-v1+json"})
+	body, err := web.Get(ctx, Npm+"/"+pkg, map[string]string{"Accept": "application/vnd.npm.install-v1+json"})
 	if err != nil {
 		return nil, err
 	}
@@ -111,6 +128,27 @@ func npmVersions(ctx context.Context, pkg string) ([]string, error) {
 	}
 	var vs []string
 	for v := range doc.Versions {
+		vs = append(vs, "v"+v)
+	}
+	return vs, nil
+}
+
+// mavenVersions lists the artifact's versions from Maven Central's
+// metadata, `group:artifact` laid out as the repository has it.
+func mavenVersions(ctx context.Context, artifact string) ([]string, error) {
+	group, name, _ := strings.Cut(artifact, ":")
+	body, err := web.Get(ctx, Maven+"/"+strings.ReplaceAll(group, ".", "/")+"/"+name+"/maven-metadata.xml", nil)
+	if err != nil {
+		return nil, err
+	}
+	var doc struct {
+		Versions []string `xml:"versioning>versions>version"`
+	}
+	if err := xml.Unmarshal(body, &doc); err != nil {
+		return nil, err
+	}
+	var vs []string
+	for _, v := range doc.Versions {
 		vs = append(vs, "v"+v)
 	}
 	return vs, nil

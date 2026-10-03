@@ -270,8 +270,44 @@ plugins:
 
   # kind release: an executable an upstream GitHub release ships
   # prebuilt, one asset per platform it ships for, the member named
-  # extracted from it; the versions discovered from the releases. The
-  # Linux executables link glibc: base applies.
+  # extracted from it (`members` naming a platform's own); the
+  # versions discovered from the releases. The Linux executables link
+  # glibc: base applies.
+  # A release recipe may name its assets by URL instead, wherever
+  # upstream publishes, its versions then Maven Central's or the npm
+  # registry's as the recipe says; an asset that is the executable
+  # itself takes no member; a digest upstream publishes beside each
+  # asset is verified.
+  grpc/java:
+    source: https://github.com/grpc/grpc-java
+    kind: release
+    maven: io.grpc:protoc-gen-grpc-java
+    checksum: sha256
+    entrypoint: protoc-gen-grpc-java
+    assets:
+      linux/amd64: https://repo1.maven.org/maven2/io/grpc/protoc-gen-grpc-java/{version}/protoc-gen-grpc-java-{version}-linux-x86_64.exe
+      linux/arm64: https://repo1.maven.org/maven2/io/grpc/protoc-gen-grpc-java/{version}/protoc-gen-grpc-java-{version}-linux-aarch_64.exe
+      darwin/amd64: https://repo1.maven.org/maven2/io/grpc/protoc-gen-grpc-java/{version}/protoc-gen-grpc-java-{version}-osx-x86_64.exe
+      darwin/arm64: https://repo1.maven.org/maven2/io/grpc/protoc-gen-grpc-java/{version}/protoc-gen-grpc-java-{version}-osx-aarch_64.exe
+      windows/amd64: https://repo1.maven.org/maven2/io/grpc/protoc-gen-grpc-java/{version}/protoc-gen-grpc-java-{version}-windows-x86_64.exe
+  # grpc-tools' executable, numbered by grpc-tools, at grpc's binary
+  # host under node's platform names; the darwin archive lays its
+  # files under the architecture's directory. Upstream's darwin-arm64
+  # archive holds an x86_64 executable alone, no arm64 one, so
+  # darwin/arm64 is not served.
+  grpc/node:
+    source: https://github.com/grpc/grpc-node
+    kind: release
+    npm: grpc-tools
+    member: bin/grpc_node_plugin{exe}
+    members:
+      darwin/amd64: x64/grpc_node_plugin
+    entrypoint: grpc_node_plugin
+    assets:
+      linux/amd64: https://node-precompiled-binaries.grpc.io/grpc-tools/v{version}/linux-x64.tar.gz
+      linux/arm64: https://node-precompiled-binaries.grpc.io/grpc-tools/v{version}/linux-arm64.tar.gz
+      darwin/amd64: https://node-precompiled-binaries.grpc.io/grpc-tools/v{version}/darwin-x64.tar.gz
+      windows/amd64: https://node-precompiled-binaries.grpc.io/grpc-tools/v{version}/win32-x64.tar.gz
   protocolbuffers/js:
     source: https://github.com/protocolbuffers/protobuf-javascript
     kind: release

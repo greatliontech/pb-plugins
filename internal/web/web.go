@@ -11,6 +11,17 @@ import (
 
 // Get fetches the URL with the headers and returns the body.
 func Get(ctx context.Context, url string, header map[string]string) ([]byte, error) {
+	body, err := Open(ctx, url, header)
+	if err != nil {
+		return nil, err
+	}
+	defer body.Close()
+	return io.ReadAll(body)
+}
+
+// Open fetches the URL with the headers and returns the body as a
+// stream, open on 200 alone.
+func Open(ctx context.Context, url string, header map[string]string) (io.ReadCloser, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -22,13 +33,9 @@ func Get(ctx context.Context, url string, header map[string]string) ([]byte, err
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
 	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
 		return nil, fmt.Errorf("%s: %s", url, resp.Status)
 	}
-	return body, nil
+	return resp.Body, nil
 }

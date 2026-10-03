@@ -33,10 +33,10 @@ and `pluginrpc`, and of the rest `apple/swift`,
 `community/scalapb-scala`, `community/scalapb-zio-grpc`,
 `community/planetscale-vtprotobuf` and the community generators the
 `go` and `node` kinds build. A plugin enters when its kind exists:
-the four kinds below first, then kinds for the rest — the `release`
-kind reading Maven Central, `rust`, `swift`, `dart`, `jvm` and
-`python`. A plugin that is a program for a runtime rather than one
-executable (a jar, a Python package) ships the runtime in its image
+the four kinds below first, then kinds for the rest — `rust`,
+`swift`, `dart`, `jvm` and `python`. A plugin that is a program for
+a runtime rather than one executable (a jar, a Python package) ships
+the runtime in its image
 behind a native launcher as the entrypoint, never compiled to a
 native executable here; where upstream itself ships one (ScalaPB),
 the `release` kind takes upstream's.
@@ -47,7 +47,7 @@ the `release` kind takes upstream's.
 |---|---|---|---|
 | `go` | a Go main package cross-compiled with CGO disabled, one host for every platform | all six | the module proxy; the repository's releases where the recipe names a tag |
 | `node` | an npm package's executable compiled by bun into one standalone executable per platform, one host for every platform | all six | the npm registry |
-| `release` | the executable an upstream GitHub release ships prebuilt, one asset per platform | the assets upstream ships | the repository's releases |
+| `release` | the executable upstream ships prebuilt, one asset per platform: a GitHub release's, or at a URL wherever upstream publishes (Maven Central, a project's binary host), the asset an archive holding it or the executable itself (an executable of its platform and architecture, by its header), a digest upstream publishes beside it verified where it publishes one | the assets upstream ships | the repository's releases, Maven Central's metadata or the npm registry, as the recipe says |
 | `bazel` | a C++ target built by bazel on a runner of the platform itself | linux and darwin on both architectures, windows/amd64 (no bazel C++ toolchain is established for windows/arm64) | the repository's releases |
 
 Every kind's trees are held to the plugin protocol before they are
@@ -68,7 +68,9 @@ module is fetched at the tag's commit, which the proxy serves as a
 pseudo-version, its path read from the `go.mod` there — upstream's
 own fact, a nested module's major suffix among it. Such a build
 reads the repository through GitHub's API, a token in
-`GITHUB_TOKEN` authenticating it where set. A plugin marked
+`GITHUB_TOKEN` authenticating it where set. A release recipe's
+`members` names a platform's member where upstream lays that
+platform's archive out differently from the rest. A plugin marked
 `frozen` takes no further version from the bump, its versions file
 complete (a generator that left its module).
 

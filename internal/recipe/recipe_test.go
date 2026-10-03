@@ -6,6 +6,12 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"debug/elf"
+	"debug/macho"
+	"debug/pe"
+	"encoding/binary"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -69,8 +75,8 @@ func zipped(t *testing.T, entries map[string]string) []byte {
 // 200 refuse.
 func TestExtractURL(t *testing.T) {
 	files := map[string][]byte{
-		"/a.tar.gz": tarGz(t, map[string]string{"bin/": "", "bin/e": "elf", "readme": "r"}, nil),
-		"/a.zip":    zipped(t, map[string]string{"bin/e.exe": "pe", "readme": "r"}),
+		"/a.tar.gz": tarGz(t, map[string]string{"bin/": "", "bin/e": string(elfOf(elf.EM_X86_64)), "readme": "r"}, nil),
+		"/a.zip":    zipped(t, map[string]string{"bin/e.exe": string(peOf(pe.IMAGE_FILE_MACHINE_AMD64)), "readme": "r"}),
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if b, ok := files[r.URL.Path]; ok {
@@ -82,26 +88,212 @@ func TestExtractURL(t *testing.T) {
 	defer srv.Close()
 	dir := t.TempDir()
 	out := filepath.Join(dir, "e")
-	if err := extractURL(context.Background(), srv.URL+"/a.tar.gz", "bin/e", out); err != nil {
+	if err := fetchAsset(context.Background(), srv.URL+"/a.tar.gz", "", "bin/e", "linux/amd64", out); err != nil {
 		t.Fatal(err)
 	}
-	if b, _ := os.ReadFile(out); string(b) != "elf" {
+	if b, _ := os.ReadFile(out); !bytes.Equal(b, elfOf(elf.EM_X86_64)) {
 		t.Errorf("tar member %q", b)
 	}
-	if err := extractURL(context.Background(), srv.URL+"/a.zip", "bin/e.exe", out); err != nil {
+	if err := fetchAsset(context.Background(), srv.URL+"/a.zip", "", "bin/e.exe", "windows/amd64", out); err != nil {
 		t.Fatal(err)
 	}
-	if b, _ := os.ReadFile(out); string(b) != "pe" {
+	if b, _ := os.ReadFile(out); !bytes.Equal(b, peOf(pe.IMAGE_FILE_MACHINE_AMD64)) {
 		t.Errorf("zip member %q", b)
 	}
-	if err := extractURL(context.Background(), srv.URL+"/a.zip", "bin/other", out); err == nil || !strings.Contains(err.Error(), "no member") {
+	if err := fetchAsset(context.Background(), srv.URL+"/a.zip", "", "bin/other", "windows/amd64", out); err == nil || !strings.Contains(err.Error(), "no member") {
 		t.Errorf("missing member: %v", err)
 	}
-	if err := extractURL(context.Background(), srv.URL+"/missing.zip", "bin/e", out); err == nil || !strings.Contains(err.Error(), "404") {
+	if err := fetchAsset(context.Background(), srv.URL+"/missing.zip", "", "bin/e", "linux/amd64", out); err == nil || !strings.Contains(err.Error(), "404") {
 		t.Errorf("missing asset: %v", err)
 	}
-	if err := extractURL(context.Background(), srv.URL+"/a.tar.gz", "bin/e", filepath.Join(dir, "deep", "e")); err != nil {
+	if err := fetchAsset(context.Background(), srv.URL+"/a.tar.gz", "", "bin/e", "linux/amd64", filepath.Join(dir, "deep", "e")); err != nil {
 		t.Errorf("a missing directory is created: %v", err)
+	}
+}
+
+// A release asset named by URL is fetched there, its templates
+// filled; one named by its file name under the repository's release
+// at the version's tag.
+func TestAssetURL(t *testing.T) {
+	byURL := &catalog.Plugin{Assets: map[string]string{"windows/amd64": "https://h/{version}/p-{version}{exe}"}}
+	if got := assetURL(byURL, "v1.2.0", "windows/amd64"); got != "https://h/1.2.0/p-1.2.0.exe" {
+		t.Errorf("by URL: %s", got)
+	}
+	byName := &catalog.Plugin{Repository: "o/r", Tag: "v{version}", Assets: map[string]string{"linux/amd64": "p-{version}-linux.tar.gz"}}
+	if got := assetURL(byName, "v1.2.0", "linux/amd64"); got != "https://github.com/o/r/releases/download/v1.2.0/p-1.2.0-linux.tar.gz" {
+		t.Errorf("by name: %s", got)
+	}
+}
+
+// elfOf, machoOf, fatOf and peOf are the smallest headers the
+// standard library's parsers read as an executable of the machine.
+func elfOf(machine elf.Machine) []byte {
+	b := make([]byte, 64)
+	copy(b, "\x7fELF")
+	b[4], b[5], b[6] = 2, 1, 1 // 64-bit, little-endian, version 1
+	binary.LittleEndian.PutUint16(b[16:], 2)
+	binary.LittleEndian.PutUint16(b[18:], uint16(machine))
+	binary.LittleEndian.PutUint32(b[20:], 1)
+	binary.LittleEndian.PutUint16(b[52:], 64) // the header's size
+	return b
+}
+
+func machoOf(cpu macho.Cpu) []byte {
+	b := make([]byte, 32)
+	binary.LittleEndian.PutUint32(b, 0xfeedfacf)
+	binary.LittleEndian.PutUint32(b[4:], uint32(cpu))
+	binary.LittleEndian.PutUint32(b[12:], 2) // an executable
+	return b
+}
+
+func fatOf(cpus ...macho.Cpu) []byte {
+	b := make([]byte, 8+20*len(cpus))
+	binary.BigEndian.PutUint32(b, 0xcafebabe)
+	binary.BigEndian.PutUint32(b[4:], uint32(len(cpus)))
+	var bodies []byte
+	for i, cpu := range cpus {
+		thin := machoOf(cpu)
+		off := len(b) + len(bodies)
+		binary.BigEndian.PutUint32(b[8+20*i:], uint32(cpu))
+		binary.BigEndian.PutUint32(b[8+20*i+8:], uint32(off))
+		binary.BigEndian.PutUint32(b[8+20*i+12:], uint32(len(thin)))
+		bodies = append(bodies, thin...)
+	}
+	return append(b, bodies...)
+}
+
+func peOf(machine uint16) []byte {
+	b := make([]byte, 64+24+112)
+	copy(b, "MZ")
+	binary.LittleEndian.PutUint32(b[0x3c:], 64)
+	copy(b[64:], "PE\x00\x00")
+	binary.LittleEndian.PutUint16(b[68:], machine)
+	binary.LittleEndian.PutUint16(b[84:], 112) // a PE32+ optional header with no data directories
+	binary.LittleEndian.PutUint16(b[88:], 0x20b)
+	return b
+}
+
+// An asset that is the executable itself lands as the entrypoint
+// whole where its header is the platform's executable's, machine
+// included — an archive of another shape, or another architecture's
+// executable, bare or extracted, is refused with nothing left; a
+// sha256 published beside an asset is verified before the asset is
+// read, a mismatch or a missing digest refusing it with nothing
+// written, the digest read as the first word of the sidecar in
+// either case.
+func TestFetchAssetBareAndVerified(t *testing.T) {
+	exe := elfOf(elf.EM_X86_64)
+	sum := sha256.Sum256(exe)
+	archive := tarGz(t, map[string]string{"bin/": "", "bin/e": string(exe)}, nil)
+	archiveSum := sha256.Sum256(archive)
+	files := map[string][]byte{
+		"/p-1.0.exe":        exe,
+		"/p-1.0.exe.sha256": []byte(strings.ToUpper(hex.EncodeToString(sum[:])) + "  p-1.0.exe\n"),
+		"/wrong.exe":        exe,
+		"/wrong.exe.sha256": []byte(strings.Repeat("0", 64) + "\n"),
+		"/nosum.exe":        exe,
+		"/a.tar.gz":         archive,
+		"/a.tar.gz.sha256":  []byte(hex.EncodeToString(archiveSum[:])),
+		"/x.tar.xz":         []byte("\xfd7zXZ\x00 compressed"),
+		"/arm.elf":          elfOf(elf.EM_AARCH64),
+		"/mac":              machoOf(macho.CpuArm64),
+		"/fat":              fatOf(macho.CpuAmd64, macho.CpuArm64),
+		"/fat-amd":          fatOf(macho.CpuAmd64),
+		"/win.exe":          peOf(pe.IMAGE_FILE_MACHINE_AMD64),
+		"/win-arm.exe":      peOf(pe.IMAGE_FILE_MACHINE_ARM64),
+		"/arm.zip":          zipped(t, map[string]string{"bin/e": string(elfOf(elf.EM_AARCH64))}),
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if b, ok := files[r.URL.Path]; ok {
+			w.Write(b)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	out := filepath.Join(dir, "e")
+	if err := fetchAsset(context.Background(), srv.URL+"/p-1.0.exe", "sha256", "", "linux/amd64", out); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(out); !bytes.Equal(b, exe) {
+		t.Errorf("the bare asset: %q", b)
+	}
+	if fi, _ := os.Stat(out); fi.Mode()&0o111 == 0 {
+		t.Error("the bare asset is not executable")
+	}
+	if err := fetchAsset(context.Background(), srv.URL+"/wrong.exe", "sha256", "", "linux/amd64", filepath.Join(dir, "w")); err == nil || !strings.Contains(err.Error(), "upstream publishes") {
+		t.Errorf("a mismatched digest: %v", err)
+	}
+	if err := fetchAsset(context.Background(), srv.URL+"/nosum.exe", "sha256", "", "linux/amd64", filepath.Join(dir, "n")); err == nil || !strings.Contains(err.Error(), "404") {
+		t.Errorf("a missing digest: %v", err)
+	}
+	refusals := map[string]struct{ asset, member, platform string }{
+		"x":  {"/x.tar.xz", "", "linux/amd64"},
+		"a":  {"/arm.elf", "", "linux/amd64"},
+		"m":  {"/mac", "", "linux/arm64"},
+		"f":  {"/fat-amd", "", "darwin/arm64"},
+		"wa": {"/win-arm.exe", "", "windows/amd64"},
+		"z":  {"/arm.zip", "bin/e", "linux/amd64"},
+	}
+	for name, r := range refusals {
+		if err := fetchAsset(context.Background(), srv.URL+r.asset, "", r.member, r.platform, filepath.Join(dir, name)); err == nil || !strings.Contains(err.Error(), "no executable of "+r.platform) && !strings.Contains(err.Error(), "executable of "+r.platform) {
+			t.Errorf("%s refused: %v", r.asset, err)
+		}
+	}
+	for _, refused := range []string{"w", "n", "x", "a", "m", "f", "wa", "z"} {
+		if _, err := os.Stat(filepath.Join(dir, refused)); err == nil {
+			t.Errorf("a refused asset was left: %s", refused)
+		}
+	}
+	admissions := map[string]struct{ asset, platform string }{
+		"mac":  {"/mac", "darwin/arm64"},
+		"fat1": {"/fat", "darwin/amd64"},
+		"fat2": {"/fat", "darwin/arm64"},
+		"win":  {"/win.exe", "windows/amd64"},
+		"wa2":  {"/win-arm.exe", "windows/arm64"},
+		"arm":  {"/arm.elf", "linux/arm64"},
+	}
+	for name, a := range admissions {
+		if err := fetchAsset(context.Background(), srv.URL+a.asset, "", "", a.platform, filepath.Join(dir, name)); err != nil {
+			t.Errorf("%s for %s: %v", a.asset, a.platform, err)
+		}
+	}
+	if err := fetchAsset(context.Background(), srv.URL+"/a.tar.gz", "sha256", "bin/e", "linux/amd64", filepath.Join(dir, "t")); err != nil {
+		t.Fatalf("a verified archive: %v", err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "t")); !bytes.Equal(b, exe) {
+		t.Errorf("the verified archive's member: %q", b)
+	}
+}
+
+// A release recipe lays one tree per platform from the asset each
+// names, the member a platform's own where the recipe names one.
+func TestBuildReleaseMembers(t *testing.T) {
+	files := map[string][]byte{
+		"/v1.0.0/linux.tar.gz":  tarGz(t, map[string]string{"bin/": "", "bin/e": string(elfOf(elf.EM_X86_64))}, nil),
+		"/v1.0.0/darwin.tar.gz": tarGz(t, map[string]string{"x64/": "", "x64/e": string(machoOf(macho.CpuAmd64))}, nil),
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if b, ok := files[r.URL.Path]; ok {
+			w.Write(b)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	p := &catalog.Plugin{Kind: catalog.KindRelease, Entrypoint: "e", Member: "bin/e", Members: map[string]string{"darwin/amd64": "x64/e"}, Assets: map[string]string{
+		"linux/amd64":  srv.URL + "/v{version}/linux.tar.gz",
+		"darwin/amd64": srv.URL + "/v{version}/darwin.tar.gz",
+	}}
+	out := t.TempDir()
+	if err := buildRelease(context.Background(), p, "v1.0.0", []string{"linux/amd64", "darwin/amd64"}, out); err != nil {
+		t.Fatal(err)
+	}
+	for pl, want := range map[string][]byte{"linux/amd64": elfOf(elf.EM_X86_64), "darwin/amd64": machoOf(macho.CpuAmd64)} {
+		if b, _ := os.ReadFile(filepath.Join(TreeDir(out, pl), "e")); !bytes.Equal(b, want) {
+			t.Errorf("%s: %q", pl, b)
+		}
 	}
 }
 
@@ -250,6 +442,32 @@ func TestGoKindFromATagLive(t *testing.T) {
 		}
 		if fi, err := os.Stat(filepath.Join(TreeDir(out, Host()), c.Plugins[name].Entrypoint)); err != nil || fi.Size() == 0 {
 			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
+// The release kind reads beyond GitHub releases: grpc/java's
+// executable from Maven Central, its sha256 verified, and grpc/node's
+// from grpc's binary host, every platform each serves built from this
+// host (network). Runs where PBPLUGINS_LIVE is set.
+func TestReleaseSourcesLive(t *testing.T) {
+	if os.Getenv("PBPLUGINS_LIVE") == "" {
+		t.Skip("PBPLUGINS_LIVE unset")
+	}
+	c, err := catalog.Load("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, version := range map[string]string{"grpc/java": "v1.84.0", "grpc/node": "v1.13.1"} {
+		out := t.TempDir()
+		platforms := c.Plugins[name].PlatformsOf()
+		if err := Build(context.Background(), c, name, version, platforms, out); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		for _, pl := range platforms {
+			if fi, err := os.Stat(filepath.Join(TreeDir(out, pl), c.Plugins[name].Entrypoint)); err != nil || fi.Size() == 0 {
+				t.Errorf("%s %s: %v", name, pl, err)
+			}
 		}
 	}
 }

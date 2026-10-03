@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 
@@ -396,5 +397,34 @@ func TestUpstreamGoFromATag(t *testing.T) {
 	vs, err = Upstream(context.Background(), &catalog.Plugin{Kind: catalog.KindGo, Module: "m.example/x"})
 	if err != nil || strings.Join(vs, " ") != "v1.0.0 v1.1.0" {
 		t.Fatalf("versions from the proxy: %v %v", vs, err)
+	}
+}
+
+// A release recipe naming a Maven artifact discovers its versions
+// from Maven Central's metadata; one naming an npm package from the
+// registry; one naming neither from the repository's releases.
+func TestUpstreamReleaseSources(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/io/grpc/protoc-gen-grpc-java/maven-metadata.xml":
+			fmt.Fprint(w, `<?xml version="1.0"?><metadata><groupId>io.grpc</groupId><artifactId>protoc-gen-grpc-java</artifactId><versioning><latest>1.84.0</latest><versions><version>1.83.1</version><version>1.84.0</version></versions></versioning></metadata>`)
+		case "/grpc-tools":
+			fmt.Fprint(w, `{"versions":{"1.13.0":{},"1.13.1":{}}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	savedMaven, savedNpm := Maven, Npm
+	Maven, Npm = srv.URL, srv.URL
+	defer func() { Maven, Npm = savedMaven, savedNpm }()
+	vs, err := Upstream(context.Background(), &catalog.Plugin{Kind: catalog.KindRelease, Maven: "io.grpc:protoc-gen-grpc-java"})
+	if err != nil || strings.Join(vs, " ") != "v1.83.1 v1.84.0" {
+		t.Fatalf("maven: %v %v", vs, err)
+	}
+	vs, err = Upstream(context.Background(), &catalog.Plugin{Kind: catalog.KindRelease, Npm: "grpc-tools"})
+	sort.Strings(vs)
+	if err != nil || strings.Join(vs, " ") != "v1.13.0 v1.13.1" {
+		t.Fatalf("npm: %v %v", vs, err)
 	}
 }
