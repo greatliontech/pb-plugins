@@ -42,7 +42,7 @@ func write(t *testing.T, dir, catalogYAML string, versions map[string]string) {
 	}
 }
 
-var head = "registry: r.example/p\nbase: r.example/base@sha256:" + "ab" + "\ntoolchains:\n  rust: 1.98.1\n  swift: 6.4.0\nsdks:\n  swift: " + strings.Repeat("ab", 32) + "\nplugins:\n"
+var head = "registry: r.example/p\nbase: r.example/base@sha256:" + "ab" + "\ntoolchains:\n  rust: 1.98.1\n  swift: 6.4.0\n  dart: 3.13.5\nsdks:\n  swift: " + strings.Repeat("ab", 32) + "\nplugins:\n"
 
 // Validate refuses each malformed shape naming the plugin and the
 // fault, and admits the well-formed ones, two-component versions
@@ -94,6 +94,15 @@ func TestValidate(t *testing.T) {
 		{"a line with a leading zero", "  a/b:\n    source: s\n    kind: swift\n    repository: o/r\n    tag: \"{version}\"\n    product: e\n    entrypoint: e\n    platforms: [linux/amd64]\n    line: v01\n", "v1.27.6\n", "no major version"},
 		{"a line that is no major", "  a/b:\n    source: s\n    kind: swift\n    repository: o/r\n    tag: \"{version}\"\n    product: e\n    entrypoint: e\n    platforms: [linux/amd64]\n    line: 1.x\n", "v1.27.6\n", "no major version"},
 		{"a version outside the line", "  a/b:\n    source: s\n    kind: swift\n    repository: o/r\n    tag: \"{version}\"\n    product: e\n    entrypoint: e\n    platforms: [linux/amd64]\n    line: v1\n", "v1.27.6\nv2.0.0\n", "outside the line v1"},
+		{"dart ok", "  a/b:\n    source: s\n    kind: dart\n    repository: o/r\n    tag: p-v{version}\n    dir: packages/p\n    main: bin/m.dart\n    entrypoint: e\n    platforms: [linux/amd64, windows/arm64]\n", "v1.0.0\n", ""},
+		{"dart at the root", "  a/b:\n    source: s\n    kind: dart\n    repository: o/r\n    tag: v{version}\n    dir: .\n    main: bin/m.dart\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", ""},
+		{"dart without dir", "  a/b:\n    source: s\n    kind: dart\n    repository: o/r\n    tag: v{version}\n    main: bin/m.dart\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", "no relative directory"},
+		{"dart dir escaping", "  a/b:\n    source: s\n    kind: dart\n    repository: o/r\n    tag: v{version}\n    dir: ../p\n    main: bin/m.dart\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", "no relative directory"},
+		{"dart main not a dart file", "  a/b:\n    source: s\n    kind: dart\n    repository: o/r\n    tag: v{version}\n    dir: .\n    main: bin/m\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", "no relative Dart file"},
+		{"dart dir with a drive", "  a/b:\n    source: s\n    kind: dart\n    repository: o/r\n    tag: v{version}\n    dir: C:/p\n    main: bin/m.dart\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", "no relative directory"},
+		{"dart main with a drive", "  a/b:\n    source: s\n    kind: dart\n    repository: o/r\n    tag: v{version}\n    dir: .\n    main: C:m.dart\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", "no relative Dart file"},
+		{"dart main absolute", "  a/b:\n    source: s\n    kind: dart\n    repository: o/r\n    tag: v{version}\n    dir: .\n    main: /m.dart\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", "no relative Dart file"},
+		{"dart foreign field", "  a/b:\n    source: s\n    kind: dart\n    repository: o/r\n    tag: v{version}\n    dir: .\n    main: m.dart\n    product: p\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", "a field of another kind"},
 		{"swift foreign field", "  a/b:\n    source: s\n    kind: swift\n    repository: o/r\n    tag: \"{version}\"\n    product: e\n    crate: c\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", "a field of another kind"},
 		{"rust ok", "  a/b:\n    source: s\n    kind: rust\n    crate: c-d\n    bin: e2\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", ""},
 		{"rust crate as a flag", "  a/b:\n    source: s\n    kind: rust\n    crate: --offline\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", "a letter first"},
@@ -185,10 +194,10 @@ func TestExpandAndPlatforms(t *testing.T) {
 	}
 }
 
-// The bazel, rust and swift kinds build on the platform itself; the
+// The bazel, rust, swift and dart kinds build on the platform itself; the
 // others cross-build from one host.
 func TestNative(t *testing.T) {
-	for k, want := range map[Kind]bool{KindGo: false, KindNode: false, KindRelease: false, KindBazel: true, KindRust: true, KindSwift: true} {
+	for k, want := range map[Kind]bool{KindGo: false, KindNode: false, KindRelease: false, KindBazel: true, KindRust: true, KindSwift: true, KindDart: true} {
 		if got := k.Native(); got != want {
 			t.Errorf("%s native: %v, want %v", k, got, want)
 		}
@@ -197,7 +206,7 @@ func TestNative(t *testing.T) {
 
 // The catalog's kinds are known; another name is not.
 func TestKnown(t *testing.T) {
-	for _, k := range []Kind{KindGo, KindNode, KindRelease, KindBazel, KindRust, KindSwift} {
+	for _, k := range []Kind{KindGo, KindNode, KindRelease, KindBazel, KindRust, KindSwift, KindDart} {
 		if !k.Known() {
 			t.Errorf("%s unknown", k)
 		}
@@ -213,6 +222,12 @@ func TestKnown(t *testing.T) {
 func TestToolchainsPinned(t *testing.T) {
 	swift := "  a/b:\n    source: s\n    kind: swift\n    repository: o/r\n    tag: \"{version}\"\n    product: e\n    entrypoint: e\n    platforms: [linux/amd64]\n"
 	sdk := "sdks:\n  swift: " + strings.Repeat("ab", 32) + "\n"
+	dart := "  c/d:\n    source: s\n    kind: dart\n    repository: o/r\n    tag: v{version}\n    dir: .\n    main: m.dart\n    entrypoint: e\n    platforms: [linux/amd64]\n"
+	dir := t.TempDir()
+	write(t, dir, "registry: r.example/p\nbase: r.example/base@sha256:ab\ntoolchains:\n  swift: 6.4.0\n"+sdk+"plugins:\n"+swift+dart, map[string]string{"a/b": "v1.0.0\n", "c/d": "v1.0.0\n"})
+	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "a dart recipe needs the dart toolchain pinned") {
+		t.Errorf("a dart recipe without the pin: %v", err)
+	}
 	for _, tc := range []struct{ name, toolchains, want string }{
 		{"swift unpinned", "toolchains:\n  rust: 1.98.1\n" + sdk, "a swift recipe needs the swift toolchain pinned"},
 		{"swift pinned", "toolchains:\n  swift: 6.4.0\n" + sdk, ""},
@@ -235,9 +250,10 @@ func TestToolchainsPinned(t *testing.T) {
 }
 
 // The go, rust and swift kinds' Linux executables are static and take no
-// base; every other kind's may link the C library.
+// base; the dart kind's links the C library and takes it, as every
+// other kind's may.
 func TestNeedsBase(t *testing.T) {
-	for k, want := range map[Kind]bool{KindGo: false, KindRust: false, KindSwift: false, KindNode: true, KindRelease: true, KindBazel: true} {
+	for k, want := range map[Kind]bool{KindGo: false, KindRust: false, KindSwift: false, KindNode: true, KindRelease: true, KindBazel: true, KindDart: true} {
 		if got := k.NeedsBase(); got != want {
 			t.Errorf("%s needs a base: %v, want %v", k, got, want)
 		}

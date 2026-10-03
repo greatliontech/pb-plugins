@@ -37,8 +37,8 @@ and `pluginrpc`, and of the rest `apple/swift`,
 `community/scalapb-scala`, `community/scalapb-zio-grpc`,
 `community/planetscale-vtprotobuf` and the community generators the
 `go` and `node` kinds build. A plugin enters when its kind exists:
-the kinds below first, then kinds for the rest — `dart`, `jvm`
-and `python`. A plugin that is a program for
+the kinds below first, then kinds for the rest — `jvm` and
+`python`. A plugin that is a program for
 a runtime rather than one executable (a jar, a Python package) ships
 the runtime in its image behind a native launcher as the entrypoint,
 never compiled to a native executable here; where upstream itself
@@ -56,6 +56,7 @@ line's past v0.11.17 do not, shipping as the jar alone, for the
 | `release` | the executable upstream ships prebuilt, one asset per platform: a GitHub release's, or at a URL wherever upstream publishes (Maven Central, a project's binary host), the asset an archive holding it or the executable itself (an executable of its platform and architecture, by its header), a digest upstream publishes beside it verified where it publishes one | the assets upstream ships | the repository's releases, Maven Central's metadata or the npm registry, as the recipe says |
 | `bazel` | a C++ target built by bazel on a runner of the platform itself | linux and darwin on both architectures, windows/amd64 (no bazel C++ toolchain is established for windows/arm64) | the repository's releases |
 | `swift` | a SwiftPM product built by swift at the repository's tag on a runner of the platform itself, with the toolchain the catalog pins (`toolchains`), with swift.org's static Linux SDK on linux so the executable is static (held to be before it is laid down, its symbols stripped), resolved to the lockfile the package commits where it commits one | linux and darwin on both architectures (no upstream builds its generator on windows) | the repository's releases |
+| `dart` | a Dart package's script compiled by `dart compile exe` at the repository's tag on a runner of the platform itself, with the SDK the catalog pins (`toolchains`), its dependencies resolved by pub as the manifest allows | all six | the repository's releases |
 | `rust` | a crate's executable installed by cargo on a runner of the platform itself, with the toolchain the catalog pins (`toolchains`), for the musl target on linux so the executable is static (held to be before it is laid down; a crate whose C dependencies need a musl C toolchain beyond the runner's compiler fails its tree job), locked to the lockfile the crate publishes (one without is refused) | all six | crates.io |
 
 Every kind's trees are held to the plugin protocol before they are
@@ -95,19 +96,21 @@ The six platforms are pb's: `linux/amd64`, `linux/arm64`,
 `darwin/amd64`, `darwin/arm64`, `windows/amd64`, `windows/arm64`.
 Every kind lays out one file per platform, the entrypoint at the
 tree's root, which the image carries as `/<entrypoint>`. The Linux
-executables of the `node`, `release` and `bazel` kinds may link the
-platform's C library, so their Linux trees are layered over the
-catalog's `base` (distroless `cc`, pinned by index digest and
-resolved to the platform's image at publish); the `go`, `rust` and
-`swift` kinds are static and take no base. On an `OS` sandbox row pb
+executables of the `node`, `release`, `bazel` and `dart` kinds may
+link the platform's C library (dart's runtime does), so their Linux
+trees are layered over the catalog's `base` (distroless `cc`, pinned
+by index digest and resolved to the platform's image at publish);
+the `go`, `rust` and `swift` kinds are static and take no base. On an `OS` sandbox row pb
 runs a Linux entrypoint only where it is static, so on such a host
 those kinds run under the docker runner while the go, rust and swift
 kinds' plugins run natively.
-A rust or swift recipe, like a bazel one, builds on a runner of the
-platform itself: cargo installs the crate from crates.io, swift
-builds the package at its tag, for the host alone; the pipeline
-installs the kind's pinned toolchain on the runner first (rustup,
-swiftly) and, on linux, what makes the executable static beside it
+A rust, swift or dart recipe, like a bazel one, builds on a runner
+of the platform itself: cargo installs the crate from crates.io,
+swift builds the package at its tag, dart compiles the package's
+script, for the host alone; the pipeline installs the kind's pinned
+toolchain on the runner first (rustup, swiftly, the Dart SDK from
+Google's archive at the checksum published beside it) and, on
+linux, what makes the executable static beside it
 (cargo's musl target, swift.org's static Linux SDK at the checksum
 the catalog pins, held equal to the one swift.org publishes). A
 darwin tree is held to bind to the system's libraries alone before
@@ -135,8 +138,8 @@ path is refused rather than published to load on the runner alone.
   merging publishes them. Versions below the highest are never
   backfilled by the bump; a version enters by hand.
 - `CI` (pull requests): format, vet, the catalog's validation and the
-  tests, the live recipe tests included on the linux and darwin
-  rows, each building its own platform's trees.
+  tests, the live recipe tests included on every row, each building
+  its own platform's trees.
 
 ## Trust
 

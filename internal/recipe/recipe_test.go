@@ -19,11 +19,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/greatliontech/pb-plugins/internal/catalog"
 	"github.com/greatliontech/pb-plugins/internal/endpoints"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/pluginpb"
 )
 
 func tarGz(t *testing.T, entries map[string]string, links map[string]string) []byte {
@@ -456,6 +459,9 @@ func TestBuildRefusals(t *testing.T) {
 	}
 	if err := Build(context.Background(), c, "apple/swift", "v1.38.1", []string{other}, out); err == nil || !strings.Contains(err.Error(), "builds on the platform itself") {
 		t.Errorf("swift kind off-host: %v", err)
+	}
+	if err := Build(context.Background(), c, "protocolbuffers/dart", "v25.1.0", []string{other}, out); err == nil || !strings.Contains(err.Error(), "builds on the platform itself") {
+		t.Errorf("dart kind off-host: %v", err)
 	}
 	if err := Build(context.Background(), c, "nobody/none", "v1.0.0", []string{"linux/amd64"}, out); err == nil {
 		t.Error("an unknown plugin built")
@@ -1003,12 +1009,93 @@ func TestLayDown(t *testing.T) {
 	}
 }
 
-// The swift kind builds every swift plugin on this host at the
-// versions its catalog file holds, bufbuild's from the moved
-// repository (network: GitHub, the packages' dependencies; swift,
-// with the static Linux SDK installed on linux). Runs where
-// PBPLUGINS_LIVE is set.
-func TestSwiftPluginsLive(t *testing.T) {
+// The probe's request carries its one file in both lists protoc
+// fills, named to generate, with the recipe's parameter where one
+// is given.
+func TestProbeRequest(t *testing.T) {
+	for _, parameter := range []string{"", "extern_path=.=crate::proto"} {
+		b, err := probeRequest(parameter)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var req pluginpb.CodeGeneratorRequest
+		if err := proto.Unmarshal(b, &req); err != nil {
+			t.Fatal(err)
+		}
+		if len(req.FileToGenerate) != 1 || len(req.ProtoFile) != 1 || len(req.SourceFileDescriptors) != 1 || req.ProtoFile[0].GetName() != req.FileToGenerate[0] || req.SourceFileDescriptors[0].GetName() != req.FileToGenerate[0] || req.GetParameter() != parameter {
+			t.Errorf("the request with parameter %q: %v", parameter, &req)
+		}
+		if len(req.SourceFileDescriptors[0].Service) != 1 || len(req.SourceFileDescriptors[0].MessageType) != 2 {
+			t.Errorf("the file's shapes: %v", req.SourceFileDescriptors[0])
+		}
+	}
+}
+
+// dart compiles the script to a standalone executable at the path
+// given.
+func TestDartCompileArgs(t *testing.T) {
+	if got := strings.Join(dartCompileArgs("bin/m.dart", "/o/e"), " "); got != "compile exe bin/m.dart -o /o/e" {
+		t.Errorf("dart args: %s", got)
+	}
+}
+
+// A dart build fetches the repository's archive at the tag, resolves
+// the package in its directory, compiles the script to the
+// entrypoint's name and lays it down; dart here a script recording
+// its calls and laying the fake plugin down at the output path.
+func TestBuildDart(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("dart is a shell script here")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/o/r/archive/refs/tags/p-v1.0.0.tar.gz" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Write(tarGz(t, map[string]string{"r-p-v1.0.0/pubspec.yaml": "name: w", "r-p-v1.0.0/packages/p/pubspec.yaml": "name: p", "r-p-v1.0.0/packages/p/bin/m.dart": "void main() {}"}, nil))
+	}))
+	defer srv.Close()
+	saved := endpoints.GitHub
+	endpoints.GitHub = srv.URL
+	defer func() { endpoints.GitHub = saved }()
+	exe := fakePlugin(t)
+	t.Setenv("PROBE_MODE", "file")
+	bin := t.TempDir()
+	log := filepath.Join(bin, "log")
+	// Every call is recorded with the directory it runs in; a
+	// compile lays the fake plugin down at -o.
+	script := "#!/bin/sh\nprintf '%s: %s\\n' \"$(basename \"$(dirname \"$PWD\")\")/$(basename \"$PWD\")\" \"$*\" >> " + log + "\nwhile [ $# -gt 0 ]; do if [ \"$1\" = -o ]; then cp " + exe + " \"$2\"; fi; shift; done\n"
+	if err := os.WriteFile(filepath.Join(bin, "dart"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	c := &catalog.Catalog{Plugins: map[string]*catalog.Plugin{"a/b": {Kind: catalog.KindDart, Repository: "o/r", Tag: "p-v{version}", Dir: "packages/p", Main: "bin/m.dart", Entrypoint: "e", Platforms: []string{Host()}}}}
+	out := t.TempDir()
+	if err := Build(context.Background(), c, "a/b", "v1.0.0", []string{Host()}, out); err != nil {
+		t.Fatal(err)
+	}
+	calls, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(calls)), "\n")
+	if len(lines) != 2 || lines[0] != "packages/p: pub get" || !strings.HasPrefix(lines[1], "packages/p: compile exe bin/m.dart -o ") || !strings.HasSuffix(lines[1], string(filepath.Separator)+"e") {
+		t.Errorf("dart's calls: %q", lines)
+	}
+	if fi, err := os.Stat(filepath.Join(TreeDir(out, Host()), "e")); err != nil || fi.Size() == 0 {
+		t.Errorf("the tree: %v", err)
+	}
+}
+
+// The swift and dart kinds build every plugin of theirs that serves
+// this host, at the versions the catalog's files hold, bufbuild's
+// swift ones from the moved repository (network: GitHub, the
+// packages' dependencies; the kind's toolchain, swift with the
+// static Linux SDK installed on linux): the versions the catalog
+// holds for the host, no fewer than the kind's floor here — swift
+// serves no windows, dart every platform — so a test building
+// nothing is caught. Runs where PBPLUGINS_LIVE is set.
+func TestTagKindsLive(t *testing.T) {
 	if os.Getenv("PBPLUGINS_LIVE") == "" {
 		t.Skip("PBPLUGINS_LIVE unset")
 	}
@@ -1016,26 +1103,33 @@ func TestSwiftPluginsLive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	built := 0
-	for _, name := range c.Names() {
-		p := c.Plugins[name]
-		if p.Kind != catalog.KindSwift {
-			continue
-		}
-		for _, version := range p.Versions {
-			out := t.TempDir()
-			if err := Build(context.Background(), c, name, version, []string{Host()}, out); err != nil {
-				t.Errorf("%s %s: %v", name, version, err)
+	floors := map[catalog.Kind]int{catalog.KindSwift: 7, catalog.KindDart: 2}
+	if runtime.GOOS == "windows" {
+		floors[catalog.KindSwift] = 0
+	}
+	for _, kind := range []catalog.Kind{catalog.KindSwift, catalog.KindDart} {
+		served, built := 0, 0
+		for _, name := range c.Names() {
+			p := c.Plugins[name]
+			if p.Kind != kind || !slices.Contains(p.PlatformsOf(), Host()) {
 				continue
 			}
-			if fi, err := os.Stat(filepath.Join(TreeDir(out, Host()), p.Entrypoint)); err != nil || fi.Size() == 0 {
-				t.Errorf("%s %s: the tree: %v", name, version, err)
+			served += len(p.Versions)
+			for _, version := range p.Versions {
+				out := t.TempDir()
+				if err := Build(context.Background(), c, name, version, []string{Host()}, out); err != nil {
+					t.Errorf("%s %s: %v", name, version, err)
+					continue
+				}
+				if fi, err := os.Stat(filepath.Join(TreeDir(out, Host()), p.Entrypoint)); err != nil || fi.Size() == 0 {
+					t.Errorf("%s %s: the tree: %v", name, version, err)
+				}
+				built++
 			}
-			built++
 		}
-	}
-	if built < 7 {
-		t.Errorf("%d swift plugin versions built, the catalog holding seven at least", built)
+		if built != served || served < floors[kind] {
+			t.Errorf("%s: %d of %d versions serving this host built, the floor here %d", kind, built, served, floors[kind])
+		}
 	}
 }
 

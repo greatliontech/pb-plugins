@@ -45,6 +45,9 @@ const (
 	// KindSwift builds a SwiftPM product at the repository's tag on
 	// a runner of the platform itself.
 	KindSwift Kind = "swift"
+	// KindDart compiles a Dart package's script to an executable at
+	// the repository's tag on a runner of the platform itself.
+	KindDart Kind = "dart"
 )
 
 // Platforms is every platform a recipe may serve, in the spelling
@@ -87,7 +90,8 @@ type Plugin struct {
 	// tag names no module: Dir is the module's directory in the
 	// repository (`.` for its root), and the module's path is read
 	// from the go.mod there at the tag's commit — upstream's own
-	// fact, a nested module's major suffix among it.
+	// fact, a nested module's major suffix among it. A dart recipe's
+	// Dir is its package's directory in the repository, likewise.
 	Module  string `yaml:"module"`
 	Dir     string `yaml:"dir"`
 	Package string `yaml:"package"`
@@ -105,6 +109,9 @@ type Plugin struct {
 	// Product is the SwiftPM product a swift recipe builds, an
 	// executable of the package at the repository's tag.
 	Product string `yaml:"product"`
+	// Main is the Dart script a dart recipe compiles, relative to
+	// the package's directory (Dir) in the repository.
+	Main string `yaml:"main"`
 	// Assets map a platform to the asset holding the executable: a
 	// release asset's name under the repository's release, or a URL
 	// (`https://...`) wherever upstream publishes — Maven Central, a
@@ -269,12 +276,13 @@ var owned = map[Kind]map[string]bool{
 	KindBazel:   fields("platforms", "repository", "tag", "archive", "strip", "files", "target", "output", "options"),
 	KindRust:    fields("platforms", "crate", "bin"),
 	KindSwift:   fields("platforms", "repository", "tag", "product"),
+	KindDart:    fields("platforms", "repository", "tag", "dir", "main"),
 }
 
 // pinned are the kinds whose toolchain the pipeline installs from
 // the catalog's `toolchains`, each required where a recipe of the
 // kind exists.
-var pinned = map[Kind]bool{KindRust: true, KindSwift: true}
+var pinned = map[Kind]bool{KindRust: true, KindSwift: true, KindDart: true}
 
 // sdkPinned are the kinds whose linux SDK the pipeline installs from
 // the catalog's `sdks`, required where a recipe of the kind exists.
@@ -521,6 +529,19 @@ func (c *Catalog) Validate() error {
 			if !repoRE.MatchString(p.Repository) || !strings.Contains(p.Tag, "{version}") || !entrypointRE.MatchString(p.Product) {
 				fail(name, "swift: repository, tag with {version} and product (a bare name) required")
 			}
+		case KindDart:
+			if !repoRE.MatchString(p.Repository) || !strings.Contains(p.Tag, "{version}") {
+				fail(name, "dart: repository owner/name and tag with {version} required")
+			}
+			// Slash-separated, clean, relative paths, the same on
+			// every host, the package's directory and the script in
+			// it.
+			if p.Dir == "" || !fs.ValidPath(p.Dir) || strings.ContainsAny(p.Dir, "\\:") {
+				fail(name, "dart: dir %q is no relative directory (`.` for the repository's root)", p.Dir)
+			}
+			if !fs.ValidPath(p.Main) || strings.ContainsAny(p.Main, "\\:") || !strings.HasSuffix(p.Main, ".dart") || p.Main == ".dart" {
+				fail(name, "dart: main %q is no relative Dart file", p.Main)
+			}
 		case KindRust:
 			if !crateRE.MatchString(p.Crate) {
 				fail(name, "rust: crate required, a crates.io package name (a letter first, 64 at most)")
@@ -616,7 +637,9 @@ func (p *Plugin) PlatformsOf() []string {
 // Native reports whether the kind builds on the platform itself, one
 // runner per platform, rather than cross-building every platform on
 // one host.
-func (k Kind) Native() bool { return k == KindBazel || k == KindRust || k == KindSwift }
+func (k Kind) Native() bool {
+	return k == KindBazel || k == KindRust || k == KindSwift || k == KindDart
+}
 
 // Known reports whether the kind is one the catalog defines.
 func (k Kind) Known() bool { _, ok := owned[k]; return ok }

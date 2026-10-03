@@ -27,12 +27,10 @@ jobs:
         shell: bash
       - run: go mod tidy -diff
       - run: go vet ./...
-      # The live recipe tests run on the linux and darwin rows, each
-      # building its own platform's trees, so a tree a native kind
-      # would publish is built here first; windows serves no native
-      # kind's recipe.
+      # The live recipe tests run on every row, each building its
+      # own platform's trees, so a tree a native kind would publish
+      # is built here first; the swift kind serves no windows.
       - name: Pin the rust toolchain, as the catalog has it
-        if: runner.os != 'Windows'
         uses: ./.github/actions/toolchain
         with:
           kind: rust
@@ -41,8 +39,12 @@ jobs:
         uses: ./.github/actions/toolchain
         with:
           kind: swift
+      - name: Pin the dart toolchain, as the catalog has it
+        uses: ./.github/actions/toolchain
+        with:
+          kind: dart
       - run: go run ./cmd/catalog check
       - run: go test ./... -count=1 -timeout 40m
         env:
-          PBPLUGINS_LIVE: ${{ runner.os != 'Windows' && '1' || '' }}
+          PBPLUGINS_LIVE: "1"
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

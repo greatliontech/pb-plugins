@@ -15,6 +15,7 @@ base: gcr.io/distroless/cc-debian13@sha256:4594d59540d1948417f6ca2829ddd9294493a
 toolchains:
   rust: 1.98.1
   swift: 6.4.0
+  dart: 3.13.5
 # The sha256 of the static Linux SDK bundle swift.org publishes for
 # the Swift release pinned above, which the runner installs beside
 # the toolchain; `catalog sdk swift` reads swift.org's and holds the
@@ -692,3 +693,28 @@ plugins:
     product: protoc-gen-grpc-swift-2
     entrypoint: protoc-gen-grpc-swift-2
     platforms: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64]
+
+  # kind dart: a package's script compiled to an executable at the
+  # repository's tag on a runner of the platform itself, with the
+  # SDK pinned above; the versions the repository's releases. The
+  # runtime links the C library: base applies.
+  # protoc_plugin lives in protobuf.dart's monorepo, tagged under its
+  # own prefix beside the protobuf package's tags.
+  protocolbuffers/dart:
+    source: https://github.com/google/protobuf.dart
+    kind: dart
+    repository: google/protobuf.dart
+    tag: protoc_plugin-v{version}
+    dir: protoc_plugin
+    main: bin/protoc_plugin.dart
+    entrypoint: protoc-gen-dart
+    platforms: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64, windows/arm64]
+  connectrpc/dart:
+    source: https://github.com/connectrpc/connect-dart
+    kind: dart
+    repository: connectrpc/connect-dart
+    tag: v{version}
+    dir: packages/connect
+    main: bin/protoc-gen-connect-dart.dart
+    entrypoint: protoc-gen-connect-dart
+    platforms: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64, windows/arm64]

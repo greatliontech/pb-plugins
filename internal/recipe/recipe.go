@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/greatliontech/pb-plugins/internal/catalog"
+	"github.com/greatliontech/pb-plugins/internal/endpoints"
 )
 
 // TreeDir is the directory of a platform's tree under out.
@@ -91,6 +92,7 @@ var builders = map[catalog.Kind]builder{
 	catalog.KindBazel: buildBazel,
 	catalog.KindRust:  buildRust,
 	catalog.KindSwift: buildSwift,
+	catalog.KindDart:  buildDart,
 }
 
 // command is a command in dir with the environment added to the
@@ -124,6 +126,22 @@ func output(ctx context.Context, dir string, env []string, name string, args ...
 		return "", fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), err)
 	}
 	return out.String(), nil
+}
+
+// fetchTag fetches the repository's archive at the version's tag
+// into a fresh directory, its one top-level directory stripped, and
+// returns the directory, the caller's to remove.
+func fetchTag(ctx context.Context, p *catalog.Plugin, version, platform, prefix string) (string, error) {
+	src, err := os.MkdirTemp("", prefix)
+	if err != nil {
+		return "", err
+	}
+	url := fmt.Sprintf("%s/%s/archive/refs/tags/%s.tar.gz", endpoints.GitHub, p.Repository, catalog.Expand(p.Tag, version, platform))
+	if err := extractTarInto(ctx, url, 1, src); err != nil {
+		os.RemoveAll(src)
+		return "", err
+	}
+	return src, nil
 }
 
 // layDown lays an executable a native kind built down as the

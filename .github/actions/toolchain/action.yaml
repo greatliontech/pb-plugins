@@ -3,9 +3,11 @@
 # rust through rustup (the toolchain, then the musl target); swift
 # through swiftly (the toolchain, then the static Linux SDK at the
 # URL and checksum swift.org publishes for the release, read by
-# `catalog sdk`, held equal to the catalog's pin). The versions and
-# targets are the catalog's, read here, so a runner installs what
-# the catalog at this commit names.
+# `catalog sdk`, held equal to the catalog's pin); dart from
+# Google's archive (the SDK's zip for the runner's platform, held to
+# the checksum published beside it). The versions and targets are
+# the catalog's, read here, so a runner installs what the catalog at
+# this commit names.
 name: toolchain
 description: install the catalog's pinned toolchain for a kind
 inputs:
@@ -55,6 +57,31 @@ runs:
             swift sdk install "$url" --checksum "$sum"
           fi
           swift --version
+          ;;
+        dart)
+          case "$RUNNER_OS" in
+          Linux) os=linux ;;
+          macOS) os=macos ;;
+          Windows) os=windows ;;
+          esac
+          case "$RUNNER_ARCH" in
+          X64) arch=x64 ;;
+          ARM64) arch=arm64 ;;
+          esac
+          zip="dartsdk-$os-$arch-release.zip"
+          base="https://storage.googleapis.com/dart-archive/channels/stable/release/$v/sdk"
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o "$zip" "$base/$zip"
+          curl -fsSL -o "$zip.sha256sum" "$base/$zip.sha256sum"
+          # The sidecar's line ending varies by platform; its first
+          # word is the checksum, compared by value.
+          want=$(cut -d' ' -f1 "$zip.sha256sum")
+          if [ "$RUNNER_OS" = macOS ]; then got=$(shasum -a 256 "$zip" | cut -d' ' -f1); else got=$(sha256sum "$zip" | cut -d' ' -f1); fi
+          if [ "$got" != "$want" ]; then echo "$zip: sha256 $got, the archive publishes $want" >&2; exit 1; fi
+          # Windows unzips with the system's tar (bsdtar reads zip).
+          if [ "$RUNNER_OS" = Windows ]; then /c/Windows/System32/tar.exe -xf "$zip"; else unzip -q "$zip"; fi
+          echo "$RUNNER_TEMP/dart-sdk/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/dart-sdk/bin/dart" --version
           ;;
         *) echo "no toolchain is pinned for the $kind kind" >&2; exit 1 ;;
         esac

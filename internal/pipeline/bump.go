@@ -93,7 +93,7 @@ func Upstream(ctx context.Context, p *catalog.Plugin) ([]string, error) {
 			return npmVersions(ctx, p.Npm)
 		}
 		return releaseVersions(ctx, p.Repository, p.Tag)
-	case catalog.KindBazel, catalog.KindSwift:
+	case catalog.KindBazel, catalog.KindSwift, catalog.KindDart:
 		return releaseVersions(ctx, p.Repository, p.Tag)
 	case catalog.KindRust:
 		return cratesVersions(ctx, p.Crate)

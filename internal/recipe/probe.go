@@ -22,7 +22,11 @@ const probeTimeout = 2 * time.Minute
 // probeRequest is the plugin-protocol request the probe hands a built
 // executable: one proto3 file of a package, a request and a response
 // message, and a service with one rpc over them — the shapes every
-// generator of the catalog acts on — with the recipe's parameter, where it names one.
+// generator of the catalog acts on — with the recipe's parameter,
+// where it names one. The file to generate rides in both the
+// request's lists, proto_file and source_file_descriptors, as protoc
+// sends it: a generator reading the latter alone (connect-dart) sees
+// nothing to generate otherwise.
 func probeRequest(parameter string) ([]byte, error) {
 	str := descriptorpb.FieldDescriptorProto_TYPE_STRING
 	label := descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL
@@ -43,7 +47,7 @@ func probeRequest(parameter string) ([]byte, error) {
 			Method: []*descriptorpb.MethodDescriptorProto{{Name: proto.String("Call"), InputType: proto.String(".probe.v1.CallRequest"), OutputType: proto.String(".probe.v1.CallResponse")}},
 		}},
 	}
-	req := &pluginpb.CodeGeneratorRequest{FileToGenerate: []string{file.GetName()}, ProtoFile: []*descriptorpb.FileDescriptorProto{file}}
+	req := &pluginpb.CodeGeneratorRequest{FileToGenerate: []string{file.GetName()}, ProtoFile: []*descriptorpb.FileDescriptorProto{file}, SourceFileDescriptors: []*descriptorpb.FileDescriptorProto{file}}
 	if parameter != "" {
 		req.Parameter = proto.String(parameter)
 	}

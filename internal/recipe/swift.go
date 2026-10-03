@@ -27,15 +27,11 @@ func buildSwift(ctx context.Context, _ *catalog.Catalog, name string, p *catalog
 		return fmt.Errorf("%s: a swift recipe builds one platform, the host's", name)
 	}
 	pl := platforms[0]
-	src, err := os.MkdirTemp("", "pb-plugins-swift-")
+	src, err := fetchTag(ctx, p, version, pl, "pb-plugins-swift-")
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(src)
-	url := fmt.Sprintf("%s/%s/archive/refs/tags/%s.tar.gz", endpoints.GitHub, p.Repository, catalog.Expand(p.Tag, version, pl))
-	if err := extractTarInto(ctx, url, 1, src); err != nil {
-		return err
-	}
 	_, err = os.Stat(filepath.Join(src, "Package.resolved"))
 	locked := err == nil
 	args := swiftBuildArgs(p.Product, SwiftTarget(pl), locked)

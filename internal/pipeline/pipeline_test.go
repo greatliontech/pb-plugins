@@ -46,13 +46,13 @@ func TestPlan(t *testing.T) {
 	for _, tr := range plan.Trees.Include {
 		seen[tr.Kind] = true
 		switch pin := c.Toolchains[tr.Kind]; {
-		case (tr.Kind == "rust" || tr.Kind == "swift") && pin == "":
+		case (tr.Kind == "rust" || tr.Kind == "swift" || tr.Kind == "dart") && pin == "":
 			t.Fatalf("the fixture pins no %s toolchain", tr.Kind)
 		case tr.Toolchain != pin:
 			t.Errorf("%s: toolchain %q, want the catalog's %q", tr.Tree, tr.Toolchain, pin)
 		}
 	}
-	if !seen["rust"] || !seen["swift"] || !seen["bazel"] {
+	if !seen["rust"] || !seen["swift"] || !seen["dart"] || !seen["bazel"] {
 		t.Errorf("the plan's tree kinds: %v", seen)
 	}
 	builds := map[string]bool{}
@@ -477,6 +477,27 @@ func TestUpstreamReleaseSources(t *testing.T) {
 	sort.Strings(vs)
 	if err != nil || strings.Join(vs, " ") != "v1.13.0 v1.13.1" {
 		t.Fatalf("npm: %v %v", vs, err)
+	}
+}
+
+// A dart recipe discovers its versions through the repository's
+// releases under its tag prefix: a monorepo's other packages' tags
+// are passed over.
+func TestUpstreamDart(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/o/r/releases" {
+			http.NotFound(w, r)
+			return
+		}
+		fmt.Fprint(w, `[{"tag_name":"protoc_plugin-v25.1.0"},{"tag_name":"protobuf-v6.1.0"},{"tag_name":"protoc_plugin-v25.0.0"}]`)
+	}))
+	defer srv.Close()
+	saved := github.API
+	github.API = srv.URL
+	defer func() { github.API = saved }()
+	vs, err := Upstream(context.Background(), &catalog.Plugin{Kind: catalog.KindDart, Repository: "o/r", Tag: "protoc_plugin-v{version}"})
+	if err != nil || strings.Join(vs, " ") != "v25.1.0 v25.0.0" {
+		t.Fatalf("versions from the releases: %v %v", vs, err)
 	}
 }
 
