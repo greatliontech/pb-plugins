@@ -42,7 +42,7 @@ func write(t *testing.T, dir, catalogYAML string, versions map[string]string) {
 	}
 }
 
-const head = "registry: r.example/p\nbase: r.example/base@sha256:" + "ab" + "\ntoolchains:\n  rust: 1.98.1\nplugins:\n"
+var head = "registry: r.example/p\nbase: r.example/base@sha256:" + "ab" + "\ntoolchains:\n  rust: 1.98.1\n  swift: 6.4.0\nsdks:\n  swift: " + strings.Repeat("ab", 32) + "\nplugins:\n"
 
 // Validate refuses each malformed shape naming the plugin and the
 // fault, and admits the well-formed ones, two-component versions
@@ -84,6 +84,13 @@ func TestValidate(t *testing.T) {
 		{"release members", "  a/b:\n    source: s\n    kind: release\n    npm: p\n    member: bin/e\n    members:\n      darwin/amd64: x64/e\n    entrypoint: e\n    assets:\n      linux/amd64: https://x/v{version}/l.tar.gz\n      darwin/amd64: https://x/v{version}/d.tar.gz\n", "v1.0.0\n", ""},
 		{"release members without asset", "  a/b:\n    source: s\n    kind: release\n    npm: p\n    member: bin/e\n    members:\n      darwin/arm64: x64/e\n    entrypoint: e\n    assets:\n      linux/amd64: https://x/v{version}/l.tar.gz\n", "v1.0.0\n", "has no asset"},
 		{"release members for an executable", "  a/b:\n    source: s\n    kind: release\n    maven: g:a\n    members:\n      linux/amd64: x\n    entrypoint: e\n    assets:\n      linux/amd64: https://x/{version}.exe\n", "v1.0.0\n", "takes no member"},
+		{"swift ok", "  a/b:\n    source: s\n    kind: swift\n    repository: o/r\n    tag: \"{version}\"\n    product: e\n    entrypoint: e\n    platforms: [linux/amd64, darwin/arm64]\n", "v1.0.0\n", ""},
+		{"swift without product", "  a/b:\n    source: s\n    kind: swift\n    repository: o/r\n    tag: \"{version}\"\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", "product"},
+		{"swift tag without version", "  a/b:\n    source: s\n    kind: swift\n    repository: o/r\n    tag: v1\n    product: e\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", "tag with {version}"},
+		{"swift product path", "  a/b:\n    source: s\n    kind: swift\n    repository: o/r\n    tag: \"{version}\"\n    product: bin/e\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", "a bare name"},
+		{"swift on windows", "  a/b:\n    source: s\n    kind: swift\n    repository: o/r\n    tag: \"{version}\"\n    product: e\n    entrypoint: e\n    platforms: [linux/amd64, windows/amd64]\n", "v1.0.0\n", "no runner path builds the kind for windows/amd64"},
+		{"bazel on windows/arm64", "  a/b:\n    source: s\n    kind: bazel\n    repository: o/r\n    tag: \"{version}\"\n    archive: https://x/{version}.tar.gz\n    target: //t\n    output: o\n    entrypoint: e\n    platforms: [windows/arm64]\n", "v1.0.0\n", "no runner path builds the kind for windows/arm64"},
+		{"swift foreign field", "  a/b:\n    source: s\n    kind: swift\n    repository: o/r\n    tag: \"{version}\"\n    product: e\n    crate: c\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", "a field of another kind"},
 		{"rust ok", "  a/b:\n    source: s\n    kind: rust\n    crate: c-d\n    bin: e2\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", ""},
 		{"rust crate as a flag", "  a/b:\n    source: s\n    kind: rust\n    crate: --offline\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", "a letter first"},
 		{"rust without crate", "  a/b:\n    source: s\n    kind: rust\n    entrypoint: e\n    platforms: [linux/amd64]\n", "v1.0.0\n", "crate required"},
@@ -174,9 +181,19 @@ func TestExpandAndPlatforms(t *testing.T) {
 	}
 }
 
+// The bazel, rust and swift kinds build on the platform itself; the
+// others cross-build from one host.
+func TestNative(t *testing.T) {
+	for k, want := range map[Kind]bool{KindGo: false, KindNode: false, KindRelease: false, KindBazel: true, KindRust: true, KindSwift: true} {
+		if got := k.Native(); got != want {
+			t.Errorf("%s native: %v, want %v", k, got, want)
+		}
+	}
+}
+
 // The catalog's kinds are known; another name is not.
 func TestKnown(t *testing.T) {
-	for _, k := range []Kind{KindGo, KindNode, KindRelease, KindBazel, KindRust} {
+	for _, k := range []Kind{KindGo, KindNode, KindRelease, KindBazel, KindRust, KindSwift} {
 		if !k.Known() {
 			t.Errorf("%s unknown", k)
 		}
@@ -186,10 +203,37 @@ func TestKnown(t *testing.T) {
 	}
 }
 
-// The go and rust kinds' Linux executables are static and take no
+// A recipe of a kind the pipeline pins a toolchain for needs the
+// catalog's pin; a pin for a kind the pipeline does not install is
+// refused.
+func TestToolchainsPinned(t *testing.T) {
+	swift := "  a/b:\n    source: s\n    kind: swift\n    repository: o/r\n    tag: \"{version}\"\n    product: e\n    entrypoint: e\n    platforms: [linux/amd64]\n"
+	sdk := "sdks:\n  swift: " + strings.Repeat("ab", 32) + "\n"
+	for _, tc := range []struct{ name, toolchains, want string }{
+		{"swift unpinned", "toolchains:\n  rust: 1.98.1\n" + sdk, "a swift recipe needs the swift toolchain pinned"},
+		{"swift pinned", "toolchains:\n  swift: 6.4.0\n" + sdk, ""},
+		{"a floating pin", "toolchains:\n  swift: \"6.3\"\n" + sdk, "is no release number"},
+		{"a kind the pipeline does not pin", "toolchains:\n  swift: 6.4.0\n  go: 1.25.0\n" + sdk, "names no kind the pipeline pins"},
+		{"swift's SDK unpinned", "toolchains:\n  swift: 6.4.0\n", "a swift recipe needs the swift SDK's checksum pinned"},
+		{"an SDK pin that is no sha256", "toolchains:\n  swift: 6.4.0\nsdks:\n  swift: 47d2\n", "is no sha256"},
+		{"an SDK for a kind the pipeline installs none for", "toolchains:\n  swift: 6.4.0\n" + sdk + "  rust: " + strings.Repeat("ab", 32) + "\n", "names no kind the pipeline installs an SDK for"},
+	} {
+		dir := t.TempDir()
+		write(t, dir, "registry: r.example/p\nbase: r.example/base@sha256:ab\n"+tc.toolchains+"plugins:\n"+swift, map[string]string{"a/b": "v1.0.0\n"})
+		_, err := Load(dir)
+		switch {
+		case tc.want == "" && err != nil:
+			t.Errorf("%s: refused: %v", tc.name, err)
+		case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)):
+			t.Errorf("%s: want %q, got %v", tc.name, tc.want, err)
+		}
+	}
+}
+
+// The go, rust and swift kinds' Linux executables are static and take no
 // base; every other kind's may link the C library.
 func TestNeedsBase(t *testing.T) {
-	for k, want := range map[Kind]bool{KindGo: false, KindRust: false, KindNode: true, KindRelease: true, KindBazel: true} {
+	for k, want := range map[Kind]bool{KindGo: false, KindRust: false, KindSwift: false, KindNode: true, KindRelease: true, KindBazel: true} {
 		if got := k.NeedsBase(); got != want {
 			t.Errorf("%s needs a base: %v, want %v", k, got, want)
 		}

@@ -14,6 +14,13 @@ base: gcr.io/distroless/cc-debian13@sha256:4594d59540d1948417f6ca2829ddd9294493a
 # The toolchains the pipeline pins on a runner before a kind's build.
 toolchains:
   rust: 1.98.1
+  swift: 6.4.0
+# The sha256 of the static Linux SDK bundle swift.org publishes for
+# the Swift release pinned above, which the runner installs beside
+# the toolchain; `catalog sdk swift` reads swift.org's and holds the
+# two equal.
+sdks:
+  swift: 47d2fd89eebfdf9eb4d536b6710414297f755c17926cdebc4742c08982b40a9e
 
 plugins:
   # kind go: a Go main package cross-compiled with CGO disabled to
@@ -611,3 +618,18 @@ plugins:
     options:
       windows:
         build: [--config=windows]
+
+  # kind swift: a SwiftPM product built at the repository's tag on a
+  # runner of the platform itself, with the toolchain pinned above,
+  # held to the package's lockfile where it commits one; the versions
+  # the repository's releases. The Linux executable is static, built
+  # with swift.org's static Linux SDK: no base. Windows is not served:
+  # no upstream builds its generator there.
+  apple/swift:
+    source: https://github.com/apple/swift-protobuf
+    kind: swift
+    repository: apple/swift-protobuf
+    tag: "{version}"
+    product: protoc-gen-swift
+    entrypoint: protoc-gen-swift
+    platforms: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64]

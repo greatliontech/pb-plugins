@@ -15,7 +15,7 @@ jobs:
       matrix:
         os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, windows-2025]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -27,15 +27,18 @@ jobs:
         shell: bash
       - run: go mod tidy -diff
       - run: go vet ./...
-      - name: Pin the rust toolchain and the host's target, as the catalog has them
+      - name: Pin the rust toolchain, as the catalog has it
         if: startsWith(matrix.os, 'ubuntu')
-        run: |
-          v=$(go run ./cmd/catalog toolchain rust)
-          rustup toolchain install "$v" --profile minimal && rustup default "$v"
-          t=$(go run ./cmd/catalog target rust)
-          if [ -n "$t" ]; then rustup target add "$t"; fi
+        uses: ./.github/actions/toolchain
+        with:
+          kind: rust
+      - name: Pin the swift toolchain, as the catalog has it
+        if: startsWith(matrix.os, 'ubuntu')
+        uses: ./.github/actions/toolchain
+        with:
+          kind: swift
       - run: go run ./cmd/catalog check
-      - run: go test ./... -count=1
+      - run: go test ./... -count=1 -timeout 40m
         env:
           PBPLUGINS_LIVE: ${{ startsWith(matrix.os, 'ubuntu') && '1' || '' }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

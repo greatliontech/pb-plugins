@@ -7,6 +7,7 @@
 //	catalog bump                        append upstream's new versions
 //	catalog toolchain <kind>            the toolchain the catalog pins
 //	catalog target <kind>               the host's target a tree job adds
+//	catalog sdk <kind>                  the SDK the target needs: its URL and the pinned checksum
 //
 // Every command reads the catalog at --catalog, the working directory
 // by default.
@@ -104,6 +105,24 @@ func run(ctx context.Context, args []string) error {
 			return fmt.Errorf("no kind %q", rest[0])
 		}
 		fmt.Println(recipe.Target(kind, recipe.Host()))
+		return nil
+	case "sdk":
+		if len(rest) != 1 {
+			return fmt.Errorf("sdk <kind>")
+		}
+		if catalog.Kind(rest[0]) != catalog.KindSwift {
+			return fmt.Errorf("no SDK for kind %q", rest[0])
+		}
+		v, ok := c.Toolchains[rest[0]]
+		if !ok {
+			return fmt.Errorf("no toolchain pinned for %q", rest[0])
+		}
+		pin := c.SDKs[rest[0]]
+		url, err := recipe.PinnedStaticSDK(ctx, v, pin)
+		if err != nil {
+			return err
+		}
+		fmt.Println(url, pin)
 		return nil
 	case "bump":
 		added, err := pipeline.Bump(ctx, c, pipeline.Upstream)

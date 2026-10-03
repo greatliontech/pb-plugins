@@ -66,7 +66,7 @@ func buildBazel(ctx context.Context, c *catalog.Catalog, name string, p *catalog
 		return err
 	}
 	built := filepath.Join(src, filepath.FromSlash(catalog.Expand(p.Output, version, pl)))
-	if err := copyFile(built, filepath.Join(TreeDir(out, pl), p.Entrypoint)); err != nil {
+	if err := layDown(p.Kind, name, pl, built, filepath.Join(TreeDir(out, pl), p.Entrypoint)); err != nil {
 		return err
 	}
 	// The build's server holds the output base open; it is stopped

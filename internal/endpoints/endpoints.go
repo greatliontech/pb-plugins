@@ -14,6 +14,14 @@ var (
 	// crate's name with the crate and its canonical name, and serves
 	// its archive by redirect under the canonical spelling alone.
 	Crates = "https://crates.io"
+	// GitHub serves a repository's tag archives (the API is the
+	// github package's own).
+	GitHub = "https://github.com"
+	// SwiftOrg publishes the Swift releases and, per release, the
+	// static Linux SDK's bundle revision and checksum; SwiftDownload
+	// serves the bundles.
+	SwiftOrg      = "https://www.swift.org"
+	SwiftDownload = "https://download.swift.org"
 )
 
 // UserAgent names the catalog to a registry that asks every client

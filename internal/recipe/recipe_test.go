@@ -159,6 +159,50 @@ func machoOf(cpu macho.Cpu) []byte {
 	return b
 }
 
+// machoLoading is machoOf with one LC_LOAD_DYLIB command per
+// library named; a name prefixed `weak:` is bound by
+// LC_LOAD_WEAK_DYLIB instead, its name at an offset past the
+// command's fixed words, as the offset word allows.
+func machoLoading(cpu macho.Cpu, libs ...string) []byte {
+	var cmds []byte
+	for _, lib := range libs {
+		kind, off := uint32(macho.LoadCmdDylib), 24
+		if strings.HasPrefix(lib, "weak:") {
+			kind, lib, off = 0x80000018, strings.TrimPrefix(lib, "weak:"), 32
+		}
+		name := append([]byte(lib), 0)
+		for len(name)%8 != 0 {
+			name = append(name, 0)
+		}
+		cmd := make([]byte, off)
+		binary.LittleEndian.PutUint32(cmd, kind)
+		binary.LittleEndian.PutUint32(cmd[4:], uint32(off+len(name)))
+		binary.LittleEndian.PutUint32(cmd[8:], uint32(off)) // the name's offset
+		cmds = append(cmds, append(cmd, name...)...)
+	}
+	b := machoOf(cpu)
+	binary.LittleEndian.PutUint32(b[16:], uint32(len(libs)))
+	binary.LittleEndian.PutUint32(b[20:], uint32(len(cmds)))
+	return append(b, cmds...)
+}
+
+// fatOfBodies is a universal executable over the thin ones given.
+func fatOfBodies(thins ...[]byte) []byte {
+	b := make([]byte, 8+20*len(thins))
+	binary.BigEndian.PutUint32(b, 0xcafebabe)
+	binary.BigEndian.PutUint32(b[4:], uint32(len(thins)))
+	var bodies []byte
+	for i, thin := range thins {
+		cpu := binary.LittleEndian.Uint32(thin[4:])
+		off := len(b) + len(bodies)
+		binary.BigEndian.PutUint32(b[8+20*i:], cpu)
+		binary.BigEndian.PutUint32(b[8+20*i+8:], uint32(off))
+		binary.BigEndian.PutUint32(b[8+20*i+12:], uint32(len(thin)))
+		bodies = append(bodies, thin...)
+	}
+	return append(b, bodies...)
+}
+
 func fatOf(cpus ...macho.Cpu) []byte {
 	b := make([]byte, 8+20*len(cpus))
 	binary.BigEndian.PutUint32(b, 0xcafebabe)
@@ -410,6 +454,9 @@ func TestBuildRefusals(t *testing.T) {
 	if err := Build(context.Background(), c, "connectrpc/rust", "v0.9.0", []string{other}, out); err == nil || !strings.Contains(err.Error(), "builds on the platform itself") {
 		t.Errorf("rust kind off-host: %v", err)
 	}
+	if err := Build(context.Background(), c, "apple/swift", "v1.38.1", []string{other}, out); err == nil || !strings.Contains(err.Error(), "builds on the platform itself") {
+		t.Errorf("swift kind off-host: %v", err)
+	}
 	if err := Build(context.Background(), c, "nobody/none", "v1.0.0", []string{"linux/amd64"}, out); err == nil {
 		t.Error("an unknown plugin built")
 	}
@@ -506,6 +553,9 @@ func TestCargoInstallArgs(t *testing.T) {
 		}
 		if got := Target(catalog.KindRust, pl); got != want {
 			t.Errorf("the rust kind's target of %s: %q, want %q", pl, got, want)
+		}
+		if got := Target(catalog.KindSwift, pl); got != SwiftTarget(pl) {
+			t.Errorf("the swift kind's target of %s: %q, want %q", pl, got, SwiftTarget(pl))
 		}
 		for _, k := range []catalog.Kind{catalog.KindGo, catalog.KindBazel, catalog.KindNode, catalog.KindRelease} {
 			if got := Target(k, pl); got != "" {
@@ -695,6 +745,281 @@ func TestBuildRustTarget(t *testing.T) {
 	}
 	if fi, err := os.Stat(filepath.Join(TreeDir(out, Host()), "e")); err != nil || fi.Size() == 0 {
 		t.Errorf("the tree: %v", err)
+	}
+}
+
+// swift builds the product in release configuration, for the static
+// Linux SDK's target on linux with its symbols stripped, held to the
+// package's lockfile where it commits one.
+func TestSwiftBuildArgs(t *testing.T) {
+	if got := strings.Join(swiftBuildArgs("protoc-gen-swift", "", false), " "); got != "build -c release --product protoc-gen-swift" {
+		t.Errorf("swift args: %s", got)
+	}
+	if got := strings.Join(swiftBuildArgs("e", "x86_64-swift-linux-musl", true), " "); got != "build -c release --product e --swift-sdk x86_64-swift-linux-musl -Xlinker -s --force-resolved-versions" {
+		t.Errorf("swift args with a target and a lockfile: %s", got)
+	}
+	for pl, want := range map[string]string{"linux/amd64": "x86_64-swift-linux-musl", "linux/arm64": "aarch64-swift-linux-musl", "darwin/arm64": "", "darwin/amd64": "", "windows/amd64": ""} {
+		if got := SwiftTarget(pl); got != want {
+			t.Errorf("target of %s: %q, want %q", pl, got, want)
+		}
+	}
+}
+
+// The static Linux SDK of a Swift release is the bundle swift.org
+// lists for it, found by its tag, at the revision and checksum it
+// publishes; a release swift.org does not list, or lists without
+// the SDK, is refused.
+func TestStaticSDK(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/install/releases.json" || !strings.Contains(r.Header.Get("User-Agent"), "pb-plugins") {
+			http.NotFound(w, r)
+			return
+		}
+		fmt.Fprint(w, `[{"name":"6.3","tag":"swift-6.3-RELEASE","platforms":[{"name":"Static SDK","platform":"static-sdk","version":"0.1.0","checksum":"63aa"}]},{"name":"6.3.3","tag":"swift-6.3.3-RELEASE","platforms":[{"name":"Ubuntu 24.04","platform":"Linux"}]},{"name":"6.4.0","tag":"swift-6.4.0-RELEASE","platforms":[{"name":"Ubuntu 24.04","platform":"Linux"},{"name":"Wasm SDK","platform":"wasm-sdk","version":"0.1.0","checksum":"f07b"},{"name":"Static SDK","platform":"static-sdk","version":"0.1.0","checksum":"47d2"}]}]`)
+	}))
+	defer srv.Close()
+	saved := endpoints.SwiftOrg
+	endpoints.SwiftOrg = srv.URL
+	defer func() { endpoints.SwiftOrg = saved }()
+	url, sum, err := StaticSDK(context.Background(), "6.4.0")
+	if err != nil || sum != "47d2" || url != "https://download.swift.org/swift-6.4.0-release/static-sdk/swift-6.4.0-RELEASE/swift-6.4.0-RELEASE_static-linux-0.1.0.artifactbundle.tar.gz" {
+		t.Errorf("the SDK: %s %s %v", url, sum, err)
+	}
+	// A release swift.org tagged without its zero patch is found
+	// from the three-component pin all the same.
+	url, sum, err = StaticSDK(context.Background(), "6.3.0")
+	if err != nil || sum != "63aa" || url != "https://download.swift.org/swift-6.3-release/static-sdk/swift-6.3-RELEASE/swift-6.3-RELEASE_static-linux-0.1.0.artifactbundle.tar.gz" {
+		t.Errorf("the SDK of a release tagged without a patch: %s %s %v", url, sum, err)
+	}
+	if _, _, err := StaticSDK(context.Background(), "6.3.1"); err == nil || !strings.Contains(err.Error(), "no such release") {
+		t.Errorf("a patch release swift.org does not list: %v", err)
+	}
+	// The pinned SDK is swift.org's where the checksums agree, refused
+	// where they do not.
+	if url, err := PinnedStaticSDK(context.Background(), "6.4.0", "47d2"); err != nil || !strings.HasSuffix(url, "swift-6.4.0-RELEASE_static-linux-0.1.0.artifactbundle.tar.gz") {
+		t.Errorf("the pinned SDK: %s %v", url, err)
+	}
+	if _, err := PinnedStaticSDK(context.Background(), "6.4.0", "0000"); err == nil || !strings.Contains(err.Error(), "the catalog pins 0000") {
+		t.Errorf("a pin swift.org disagrees with: %v", err)
+	}
+	if _, _, err := StaticSDK(context.Background(), "6.3.3"); err == nil || !strings.Contains(err.Error(), "no static Linux SDK") {
+		t.Errorf("a release without the SDK: %v", err)
+	}
+	if _, _, err := StaticSDK(context.Background(), "6.9.0"); err == nil || !strings.Contains(err.Error(), "no such release") {
+		t.Errorf("a release swift.org does not list: %v", err)
+	}
+}
+
+// A swift build fetches the repository's archive at the tag, hands
+// swift the product, the host platform's target (the static Linux
+// SDK's on linux, none elsewhere) and the lockfile flag where the
+// package commits one, reads the executable where swift says it
+// lies and lays it down; swift here a script recording its
+// arguments and laying the fake plugin down there.
+func TestBuildSwiftTarget(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("swift is a shell script here")
+	}
+	archives := map[string][]byte{
+		"/o/r/archive/refs/tags/1.0.0.tar.gz": tarGz(t, map[string]string{"r-1.0.0/Package.swift": "// swift-tools-version:6.0", "r-1.0.0/Package.resolved": "{}"}, nil),
+		"/o/r/archive/refs/tags/2.0.0.tar.gz": tarGz(t, map[string]string{"r-2.0.0/Package.swift": "// swift-tools-version:6.0"}, nil),
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if b, ok := archives[r.URL.Path]; ok {
+			w.Write(b)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	saved := endpoints.GitHub
+	endpoints.GitHub = srv.URL
+	defer func() { endpoints.GitHub = saved }()
+	exe := fakePlugin(t)
+	t.Setenv("PROBE_MODE", "file")
+	log := fakeSwift(t, exe)
+	c := &catalog.Catalog{Plugins: map[string]*catalog.Plugin{"a/b": {Kind: catalog.KindSwift, Repository: "o/r", Tag: "{version}", Product: "e", Entrypoint: "e", Platforms: []string{Host()}}}}
+	for version, locked := range map[string]bool{"v1.0.0": true, "v2.0.0": false} {
+		os.Remove(log)
+		out := t.TempDir()
+		if err := Build(context.Background(), c, "a/b", version, []string{Host()}, out); err != nil {
+			t.Fatalf("%s: %v", version, err)
+		}
+		args, err := os.ReadFile(log)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The build, then the same build asked where its products lie.
+		build := strings.Join(swiftBuildArgs("e", SwiftTarget(Host()), locked), " ")
+		if want := build + "\n" + build + " --show-bin-path\n"; string(args) != want {
+			t.Errorf("%s: swift's calls %q, want %q", version, args, want)
+		}
+		if fi, err := os.Stat(filepath.Join(TreeDir(out, Host()), "e")); err != nil || fi.Size() == 0 {
+			t.Errorf("%s: the tree: %v", version, err)
+		}
+	}
+}
+
+// A swift build on linux refuses a dynamically linked executable
+// swift produced, laying nothing down.
+func TestBuildSwiftRefusesDynamic(t *testing.T) {
+	if SwiftTarget(Host()) == "" {
+		t.Skip("no target on this host")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(tarGz(t, map[string]string{"r-1.0.0/Package.swift": "// swift-tools-version:6.0"}, nil))
+	}))
+	defer srv.Close()
+	saved := endpoints.GitHub
+	endpoints.GitHub = srv.URL
+	defer func() { endpoints.GitHub = saved }()
+	dynamic := filepath.Join(t.TempDir(), "dynamic")
+	os.WriteFile(dynamic, elfWithInterp(map[string]elf.Machine{"amd64": elf.EM_X86_64, "arm64": elf.EM_AARCH64}[runtime.GOARCH]), 0o755)
+	fakeSwift(t, dynamic)
+	c := &catalog.Catalog{Plugins: map[string]*catalog.Plugin{"a/b": {Kind: catalog.KindSwift, Repository: "o/r", Tag: "{version}", Product: "e", Entrypoint: "e", Platforms: []string{Host()}}}}
+	out := t.TempDir()
+	if err := Build(context.Background(), c, "a/b", "v1.0.0", []string{Host()}, out); err == nil || !strings.Contains(err.Error(), "dynamically linked") {
+		t.Errorf("a dynamic executable: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(TreeDir(out, Host()), "e")); err == nil {
+		t.Error("the dynamic executable was laid down")
+	}
+}
+
+// The swift kind builds apple/swift's product on this host and lays
+// its executable down (network: GitHub; swift, with the static Linux
+// SDK installed on linux). Runs where PBPLUGINS_LIVE is set.
+func TestSwiftKindLive(t *testing.T) {
+	if os.Getenv("PBPLUGINS_LIVE") == "" {
+		t.Skip("PBPLUGINS_LIVE unset")
+	}
+	c, err := catalog.Load("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := t.TempDir()
+	if err := Build(context.Background(), c, "apple/swift", "v1.38.1", []string{Host()}, out); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(filepath.Join(TreeDir(out, Host()), "protoc-gen-swift")); err != nil || fi.Size() == 0 {
+		t.Errorf("the tree: %v", err)
+	}
+}
+
+// fakeSwift puts a swift on the PATH that records every call and,
+// asked where the products lie, answers with the release directory,
+// where a build lays exe down under the product's name; the log's
+// path is returned.
+func fakeSwift(t *testing.T, exe string) string {
+	t.Helper()
+	bin := t.TempDir()
+	log := filepath.Join(bin, "log")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + log + "\ncase \"$*\" in *--show-bin-path*) echo \"$PWD/.build/release\"; exit 0;; esac\nwhile [ $# -gt 0 ]; do if [ \"$1\" = --product ]; then prod=$2; fi; shift; done\nmkdir -p .build/release && cp " + exe + " \".build/release/$prod\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "swift"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return log
+}
+
+// A darwin tree binds to the system's libraries alone: a Mach-O
+// loading a library through a search path or from a toolchain is
+// refused, thin or any architecture of a universal one; one loading
+// the system's passes.
+func TestCheckPortable(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name string, b []byte) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, b, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	system := machoLoading(macho.CpuArm64, "/usr/lib/libSystem.B.dylib", "/usr/lib/swift/libswiftCore.dylib")
+	rpath := machoLoading(macho.CpuArm64, "/usr/lib/libSystem.B.dylib", "@rpath/libswiftCompatibilitySpan.dylib")
+	toolchain := machoLoading(macho.CpuAmd64, "/Library/Developer/Toolchains/swift-6.4.0-RELEASE.xctoolchain/usr/lib/swift/macosx/libswift_Concurrency.dylib")
+	weak := machoLoading(macho.CpuArm64, "/usr/lib/libSystem.B.dylib", "weak:@rpath/libswiftCompatibilitySpan.dylib")
+	weakSystem := machoLoading(macho.CpuArm64, "weak:/usr/lib/swift/libswift_Concurrency.dylib")
+	if err := checkPortable(write("system", system)); err != nil {
+		t.Errorf("the system's libraries: %v", err)
+	}
+	if err := checkPortable(write("rpath", rpath)); err == nil || !strings.Contains(err.Error(), "@rpath/libswiftCompatibilitySpan.dylib") {
+		t.Errorf("a search path: %v", err)
+	}
+	if err := checkPortable(write("toolchain", toolchain)); err == nil || !strings.Contains(err.Error(), "/Library/Developer/Toolchains") {
+		t.Errorf("a toolchain's library: %v", err)
+	}
+	// A weak binding counts as a binding: a toolchain's compatibility
+	// library is bound so.
+	if err := checkPortable(write("weak", weak)); err == nil || !strings.Contains(err.Error(), "@rpath/libswiftCompatibilitySpan.dylib") {
+		t.Errorf("a weak search-path binding: %v", err)
+	}
+	if err := checkPortable(write("weak-system", weakSystem)); err != nil {
+		t.Errorf("a weak binding to the system: %v", err)
+	}
+	// A binding whose name cannot be read is refused, not passed over.
+	malformed := machoLoading(macho.CpuArm64, "weak:/usr/lib/libSystem.B.dylib")
+	binary.LittleEndian.PutUint32(malformed[32+8:], 0xffff) // the name's offset, outside the command
+	if err := checkPortable(write("malformed", malformed)); err == nil || !strings.Contains(err.Error(), "no readable library") {
+		t.Errorf("a malformed binding: %v", err)
+	}
+	// A command too short for a binding's fixed words is refused too.
+	short := machoOf(macho.CpuArm64)
+	short = append(short, 0x18, 0, 0, 0x80, 8, 0, 0, 0) // LC_LOAD_WEAK_DYLIB, 8 bytes long
+	binary.LittleEndian.PutUint32(short[16:], 1)
+	binary.LittleEndian.PutUint32(short[20:], 8)
+	if err := checkPortable(write("short", short)); err == nil || !strings.Contains(err.Error(), "no readable library") {
+		t.Errorf("a binding too short for its words: %v", err)
+	}
+	inHeader := machoLoading(macho.CpuArm64, "weak:/usr/lib/libSystem.B.dylib")
+	binary.LittleEndian.PutUint32(inHeader[32+8:], 8) // the name's offset, inside the fixed words
+	if err := checkPortable(write("in-header", inHeader)); err == nil || !strings.Contains(err.Error(), "no readable library") {
+		t.Errorf("a binding named inside the command's fixed words: %v", err)
+	}
+	if err := checkPortable(write("fat", fatOfBodies(system, toolchain))); err == nil || !strings.Contains(err.Error(), "/Library/Developer/Toolchains") {
+		t.Errorf("a universal executable with one architecture bound to a toolchain: %v", err)
+	}
+	if err := checkPortable(write("none", []byte("x"))); err == nil {
+		t.Error("no Mach-O passed")
+	}
+}
+
+// An executable is laid down as a platform's entrypoint once held to
+// load elsewhere than the runner: a linux one static where its kind
+// takes no base, a darwin one bound to the system's libraries, a
+// windows one as it is; a refused one is not laid down.
+func TestLayDown(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name string, b []byte) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, b, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	for _, tc := range []struct {
+		name     string
+		kind     catalog.Kind
+		platform string
+		built    []byte
+		want     string
+	}{
+		{"static elf", catalog.KindSwift, "linux/arm64", elfOf(elf.EM_AARCH64), ""},
+		{"dynamic elf", catalog.KindRust, "linux/amd64", elfWithInterp(elf.EM_X86_64), "dynamically linked"},
+		{"dynamic elf of a kind over the base", catalog.KindBazel, "linux/amd64", elfWithInterp(elf.EM_X86_64), ""},
+		{"system macho", catalog.KindSwift, "darwin/arm64", machoLoading(macho.CpuArm64, "/usr/lib/libSystem.B.dylib"), ""},
+		{"rpath macho", catalog.KindBazel, "darwin/amd64", machoLoading(macho.CpuAmd64, "@rpath/libswift_Concurrency.dylib"), "@rpath/libswift_Concurrency.dylib"},
+		{"windows as it is", catalog.KindRust, "windows/amd64", []byte("MZ"), ""},
+	} {
+		dst := filepath.Join(dir, tc.name, "e")
+		err := layDown(tc.kind, "a/b", tc.platform, write(tc.name+".built", tc.built), dst)
+		_, laid := os.Stat(dst)
+		switch {
+		case tc.want == "" && (err != nil || laid != nil):
+			t.Errorf("%s: %v, laid down: %v", tc.name, err, laid == nil)
+		case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), "a/b "+tc.platform) || laid == nil):
+			t.Errorf("%s: %v, laid down: %v", tc.name, err, laid == nil)
+		}
 	}
 }
 

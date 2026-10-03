@@ -5,9 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"debug/elf"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -24,10 +22,8 @@ import (
 // platform itself — the host's — into a throwaway root, locked to
 // the crate's own lockfile, which the crate must publish (cargo
 // only warns where it does not, resolving afresh), for the musl
-// target on linux, where the executable is held to be static before
-// it is laid down as the tree's entrypoint (a dynamic one, which a
-// host's RUSTFLAGS could produce, would load in no image of the
-// kind's, having no base).
+// target on linux, and lays its executable down as the tree's
+// entrypoint, held to load elsewhere than this host (layDown).
 func buildRust(ctx context.Context, _ *catalog.Catalog, name string, p *catalog.Plugin, version string, platforms []string, out string) error {
 	if len(platforms) != 1 {
 		return fmt.Errorf("%s: a rust recipe builds one platform, the host's", name)
@@ -52,30 +48,7 @@ func buildRust(ctx context.Context, _ *catalog.Catalog, name string, p *catalog.
 	if bin == "" {
 		bin = p.Entrypoint
 	}
-	built := filepath.Join(root, "bin", catalog.Expand(bin+"{exe}", version, pl))
-	if RustTarget(pl) != "" {
-		if err := checkStatic(built); err != nil {
-			return fmt.Errorf("%s %s: %w", name, pl, err)
-		}
-	}
-	return copyFile(built, filepath.Join(TreeDir(out, pl), p.Entrypoint))
-}
-
-// checkStatic refuses an ELF executable that names an interpreter:
-// one the OS sandbox row does not load, and one no image of a
-// baseless kind could load either.
-func checkStatic(path string) error {
-	f, err := elf.Open(path)
-	if err != nil {
-		return fmt.Errorf("no ELF executable: %w", err)
-	}
-	defer f.Close()
-	for _, p := range f.Progs {
-		if p.Type == elf.PT_INTERP {
-			return errors.New("dynamically linked: a linux tree of the rust kind is static")
-		}
-	}
-	return nil
+	return layDown(p.Kind, name, pl, filepath.Join(root, "bin", catalog.Expand(bin+"{exe}", version, pl)), filepath.Join(TreeDir(out, pl), p.Entrypoint))
 }
 
 // crateLocked refuses a crate whose archive at the version publishes
@@ -137,13 +110,16 @@ func cargoInstallArgs(crate, version, root, target string) []string {
 }
 
 // Target is the toolchain target a tree job adds beside the kind's
-// pinned toolchain: the rust kind's platform target; nothing for
-// another kind.
+// pinned toolchain: the rust kind's musl target, the swift kind's
+// static Linux SDK; nothing for another kind or platform.
 func Target(kind catalog.Kind, platform string) string {
-	if kind != catalog.KindRust {
-		return ""
+	switch kind {
+	case catalog.KindRust:
+		return RustTarget(platform)
+	case catalog.KindSwift:
+		return SwiftTarget(platform)
 	}
-	return RustTarget(platform)
+	return ""
 }
 
 // RustTarget is the rust target a platform's tree is built for

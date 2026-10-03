@@ -102,10 +102,9 @@ jobs:
           go-version-file: go.mod
       - name: Pin the toolchain
         if: matrix.toolchain != ''
-        run: |
-          rustup toolchain install "${{ matrix.toolchain }}" --profile minimal && rustup default "${{ matrix.toolchain }}"
-          if [ -n "${{ matrix.target }}" ]; then rustup target add "${{ matrix.target }}"; fi
-        shell: bash
+        uses: ./.github/actions/toolchain
+        with:
+          kind: ${{ matrix.kind }}
       - name: Build the tree
         run: go run ./cmd/catalog tree "${{ matrix.plugin }}" "${{ matrix.version }}" --platform "${{ matrix.platforms }}" --out trees
         env:

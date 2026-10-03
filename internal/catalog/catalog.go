@@ -42,6 +42,9 @@ const (
 	// KindRust installs a crate's executable with cargo, on a runner
 	// of the platform itself.
 	KindRust Kind = "rust"
+	// KindSwift builds a SwiftPM product at the repository's tag on
+	// a runner of the platform itself.
+	KindSwift Kind = "swift"
 )
 
 // Platforms is every platform a recipe may serve, in the spelling
@@ -94,6 +97,9 @@ type Plugin struct {
 	// with pb's `v` stripped).
 	Repository string `yaml:"repository"`
 	Tag        string `yaml:"tag"`
+	// Product is the SwiftPM product a swift recipe builds, an
+	// executable of the package at the repository's tag.
+	Product string `yaml:"product"`
 	// Assets map a platform to the asset holding the executable: a
 	// release asset's name under the repository's release, or a URL
 	// (`https://...`) wherever upstream publishes — Maven Central, a
@@ -157,8 +163,15 @@ type Catalog struct {
 	// release or bazel recipe are layered over.
 	Base string `yaml:"base"`
 	// Toolchains pin, by kind, the toolchain the pipeline installs
-	// before building a kind's trees (`rust`: the rust release).
+	// before building a kind's trees (`rust`: the rust release;
+	// `swift`: the Swift release), each one exact release, three
+	// components, so neither installer floats to a later patch.
 	Toolchains map[string]string `yaml:"toolchains"`
+	// SDKs pin, by kind, the sha256 of the SDK the pipeline installs
+	// beside the toolchain on linux (`swift`: the release's static
+	// Linux SDK bundle), held equal to the checksum swift.org
+	// publishes before it is installed.
+	SDKs map[string]string `yaml:"sdks"`
 	// Plugins by name, buf's `owner/plugin`.
 	Plugins map[string]*Plugin `yaml:"plugins"`
 	// Dir is the catalog's directory, where plugins/ lies.
@@ -237,6 +250,7 @@ var (
 	mavenRE      = regexp.MustCompile(`^[A-Za-z0-9._-]+:[A-Za-z0-9._-]+$`)
 	crateRE      = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{0,63}$`)
 	toolchainRE  = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
+	checksumRE   = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
 // owned is the recipe fields each kind may set, by the fields'
@@ -248,6 +262,24 @@ var owned = map[Kind]map[string]bool{
 	KindRelease: fields("repository", "tag", "assets", "member", "members", "maven", "npm", "checksum"),
 	KindBazel:   fields("platforms", "repository", "tag", "archive", "strip", "files", "target", "output", "options"),
 	KindRust:    fields("platforms", "crate", "bin"),
+	KindSwift:   fields("platforms", "repository", "tag", "product"),
+}
+
+// pinned are the kinds whose toolchain the pipeline installs from
+// the catalog's `toolchains`, each required where a recipe of the
+// kind exists.
+var pinned = map[Kind]bool{KindRust: true, KindSwift: true}
+
+// sdkPinned are the kinds whose linux SDK the pipeline installs from
+// the catalog's `sdks`, required where a recipe of the kind exists.
+var sdkPinned = map[Kind]bool{KindSwift: true}
+
+// unserved are the platforms a kind has no runner path for: no
+// toolchain the pipeline installs builds a swift package on windows,
+// and no bazel C++ toolchain is established for windows/arm64.
+var unserved = map[Kind]map[string]bool{
+	KindSwift: {"windows/amd64": true, "windows/arm64": true},
+	KindBazel: {"windows/arm64": true},
 }
 
 // common are the fields every kind takes; a release recipe's
@@ -337,19 +369,34 @@ func (c *Catalog) Validate() error {
 		errs = append(errs, errors.New("no plugins"))
 	}
 	for kind, v := range c.Toolchains {
-		if kind != string(KindRust) {
+		if !pinned[Kind(kind)] {
 			errs = append(errs, fmt.Errorf("toolchains: %q names no kind the pipeline pins a toolchain for", kind))
 		}
 		if !toolchainRE.MatchString(v) {
 			errs = append(errs, fmt.Errorf("toolchains: %s %q is no release number", kind, v))
 		}
 	}
-	hasRust := false
-	for _, p := range c.Plugins {
-		hasRust = hasRust || p.Kind == KindRust
+	for kind, v := range c.SDKs {
+		if !sdkPinned[Kind(kind)] {
+			errs = append(errs, fmt.Errorf("sdks: %q names no kind the pipeline installs an SDK for", kind))
+		}
+		if !checksumRE.MatchString(v) {
+			errs = append(errs, fmt.Errorf("sdks: %s %q is no sha256", kind, v))
+		}
 	}
-	if hasRust && c.Toolchains[string(KindRust)] == "" {
-		errs = append(errs, errors.New("toolchains: a rust recipe needs the rust toolchain pinned"))
+	kinds := map[Kind]bool{}
+	for _, p := range c.Plugins {
+		kinds[p.Kind] = true
+	}
+	for kind := range pinned {
+		if kinds[kind] && c.Toolchains[string(kind)] == "" {
+			errs = append(errs, fmt.Errorf("toolchains: a %s recipe needs the %s toolchain pinned", kind, kind))
+		}
+	}
+	for kind := range sdkPinned {
+		if kinds[kind] && c.SDKs[string(kind)] == "" {
+			errs = append(errs, fmt.Errorf("sdks: a %s recipe needs the %s SDK's checksum pinned", kind, kind))
+		}
 	}
 	for _, name := range c.Names() {
 		p := c.Plugins[name]
@@ -464,6 +511,10 @@ func (c *Catalog) Validate() error {
 					fail(name, "bazel: options for %q, no operating system", os)
 				}
 			}
+		case KindSwift:
+			if !repoRE.MatchString(p.Repository) || !strings.Contains(p.Tag, "{version}") || !entrypointRE.MatchString(p.Product) {
+				fail(name, "swift: repository, tag with {version} and product (a bare name) required")
+			}
 		case KindRust:
 			if !crateRE.MatchString(p.Crate) {
 				fail(name, "rust: crate required, a crates.io package name (a letter first, 64 at most)")
@@ -486,6 +537,9 @@ func (c *Catalog) Validate() error {
 		for _, pl := range platforms {
 			if !known(pl) {
 				fail(name, "platform %q is none of %v", pl, Platforms)
+			}
+			if unserved[p.Kind][pl] {
+				fail(name, "%s: no runner path builds the kind for %s", p.Kind, pl)
 			}
 			if seen[pl] {
 				fail(name, "platform %q twice", pl)
@@ -546,16 +600,16 @@ func (p *Plugin) PlatformsOf() []string {
 // Native reports whether the kind builds on the platform itself, one
 // runner per platform, rather than cross-building every platform on
 // one host.
-func (k Kind) Native() bool { return k == KindBazel || k == KindRust }
+func (k Kind) Native() bool { return k == KindBazel || k == KindRust || k == KindSwift }
 
 // Known reports whether the kind is one the catalog defines.
 func (k Kind) Known() bool { _, ok := owned[k]; return ok }
 
 // NeedsBase reports whether the kind's Linux trees are layered over
 // the catalog's base: every kind whose executables link the C
-// library, which is every kind but go and rust, whose Linux
+// library, which is every kind but go, rust and swift, whose Linux
 // executables are static.
-func (k Kind) NeedsBase() bool { return k != KindGo && k != KindRust }
+func (k Kind) NeedsBase() bool { return k != KindGo && k != KindRust && k != KindSwift }
 
 // Expand fills a recipe template: `{version}` with the version's
 // number (the tag less its `v`), `{tag}` with the tag as pb spells

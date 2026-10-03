@@ -16,7 +16,6 @@ import (
 	"github.com/greatliontech/pb-plugins/internal/catalog"
 	"github.com/greatliontech/pb-plugins/internal/endpoints"
 	"github.com/greatliontech/pb-plugins/internal/github"
-	"github.com/greatliontech/pb-plugins/internal/recipe"
 )
 
 func load(t *testing.T) *catalog.Catalog {
@@ -41,21 +40,20 @@ func TestPlan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A rust tree carries the catalog's pinned toolchain; a bazel one
-	// none.
+	// A rust or swift tree carries the catalog's pinned toolchain; a
+	// bazel one none.
+	seen := map[string]bool{}
 	for _, tr := range plan.Trees.Include {
-		switch {
-		case tr.Kind == "rust" && tr.Toolchain != c.Toolchains["rust"]:
-			t.Errorf("%s: toolchain %q, want the catalog's %q", tr.Tree, tr.Toolchain, c.Toolchains["rust"])
-		case tr.Kind == "rust" && tr.Target != recipe.RustTarget(tr.Platforms):
-			t.Errorf("%s: target %q, want %q", tr.Tree, tr.Target, recipe.RustTarget(tr.Platforms))
-		case tr.Kind == "rust" && strings.HasPrefix(tr.Platforms, "linux/") && tr.Target == "":
-			t.Errorf("%s: no target for a linux rust tree", tr.Tree)
-		case tr.Kind != "rust" && tr.Target != "":
-			t.Errorf("%s: a target for the %s kind: %q", tr.Tree, tr.Kind, tr.Target)
-		case tr.Kind != "rust" && tr.Toolchain != "":
-			t.Errorf("%s: a toolchain for a %s tree", tr.Tree, tr.Kind)
+		seen[tr.Kind] = true
+		switch pin := c.Toolchains[tr.Kind]; {
+		case (tr.Kind == "rust" || tr.Kind == "swift") && pin == "":
+			t.Fatalf("the fixture pins no %s toolchain", tr.Kind)
+		case tr.Toolchain != pin:
+			t.Errorf("%s: toolchain %q, want the catalog's %q", tr.Tree, tr.Toolchain, pin)
 		}
+	}
+	if !seen["rust"] || !seen["swift"] || !seen["bazel"] {
+		t.Errorf("the plan's tree kinds: %v", seen)
 	}
 	builds := map[string]bool{}
 	for _, b := range plan.Builds.Include {
@@ -444,6 +442,26 @@ func TestUpstreamReleaseSources(t *testing.T) {
 	sort.Strings(vs)
 	if err != nil || strings.Join(vs, " ") != "v1.13.0 v1.13.1" {
 		t.Fatalf("npm: %v %v", vs, err)
+	}
+}
+
+// A swift recipe discovers its versions through the repository's
+// releases, as a bazel one does; a tag of another shape is passed.
+func TestUpstreamSwift(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/o/r/releases" {
+			http.NotFound(w, r)
+			return
+		}
+		fmt.Fprint(w, `[{"tag_name":"1.38.1"},{"tag_name":"protoc-artifactbundle-v32.1"},{"tag_name":"1.38.0","prerelease":true}]`)
+	}))
+	defer srv.Close()
+	saved := github.API
+	github.API = srv.URL
+	defer func() { github.API = saved }()
+	vs, err := Upstream(context.Background(), &catalog.Plugin{Kind: catalog.KindSwift, Repository: "o/r", Tag: "{version}"})
+	if err != nil || strings.Join(vs, " ") != "v1.38.1" {
+		t.Fatalf("versions from the releases: %v %v", vs, err)
 	}
 }
 
